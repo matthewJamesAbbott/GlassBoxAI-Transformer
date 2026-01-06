@@ -1,8 +1,26 @@
-//
-// GGUF f32 CLI Transformer - CUDA Implementation with Full GGML Dequantization
-// Matthew Abbott 2025
-// Updated with GPU/CPU Offloading Support
-//
+/*
+ * MIT License
+ * 
+ * Copyright (c) 2025 Matthew Abbott
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
 #include <iostream>
 #include <fstream>
@@ -13,6 +31,7 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <algorithm>
 #include <random>
 #include <chrono>
@@ -212,12 +231,17 @@ void addResidual_cpu(float* output, const float* residual, int size) {
 }
 
 void applyRoPE_cpu(float* Q, float* K, int seqLen, int numHeads, int numKVHeads, int headDim, float ropeTheta = 10000.0f) {
+    // RoPE formula: freq_i = 1 / (theta^(2i/d)) for dimension pair i
+    // Since we iterate i by 2 (0, 2, 4, ...), the effective pair index is i/2
+    // So freq = 1 / (theta^((i/2)*2/d)) = 1 / (theta^(i/d))
+    
     // Apply RoPE to Q (numHeads)
     for (int pos = 0; pos < seqLen; pos++) {
         for (int h = 0; h < numHeads; h++) {
             for (int i = 0; i + 1 < headDim; i += 2) {
-                float theta = powf(ropeTheta, -2.0f * i / headDim);
-                float angle = pos * theta;
+                // freq = 1 / theta^(i/d) where i is the dimension index (0, 2, 4, ...)
+                float freq = 1.0f / powf(ropeTheta, (float)i / (float)headDim);
+                float angle = (float)pos * freq;
                 float cosAngle = cosf(angle);
                 float sinAngle = sinf(angle);
                 
@@ -236,8 +260,8 @@ void applyRoPE_cpu(float* Q, float* K, int seqLen, int numHeads, int numKVHeads,
     for (int pos = 0; pos < seqLen; pos++) {
         for (int h = 0; h < numKVHeads; h++) {
             for (int i = 0; i + 1 < headDim; i += 2) {
-                float theta = powf(ropeTheta, -2.0f * i / headDim);
-                float angle = pos * theta;
+                float freq = 1.0f / powf(ropeTheta, (float)i / (float)headDim);
+                float angle = (float)pos * freq;
                 float cosAngle = cosf(angle);
                 float sinAngle = sinf(angle);
                 
@@ -460,6 +484,14 @@ struct block_q8_K {
     int16_t bsums[QK_K/16];     // sum of quants in groups of 16
 };
 
+// block_q8_0: Simple 8-bit quantization, 32 elements per block
+// This is the simplest quant format - just scale + 32 int8 values
+#define QK8_0 32
+struct block_q8_0 {
+    uint16_t d;                 // delta (f16)
+    int8_t qs[QK8_0];           // quants
+};
+
 // ==================== QuantizedTensor for on-the-fly dequantization ====================
 
 struct QuantizedTensor {
@@ -497,7 +529,7 @@ struct QuantizedTensor {
             case GGML_DType::Q4_1: return 4 + 32/2;  // 2x f16 + 32 4-bit values
             case GGML_DType::Q5_0: return 2 + 4 + 32/2;  // f16 + high bits + low nibbles
             case GGML_DType::Q5_1: return 4 + 4 + 32/2;
-            case GGML_DType::Q8_0: return 4 + 32;    // f32 scale + 32 int8 values
+            case GGML_DType::Q8_0: return sizeof(block_q8_0);  // f16 scale + 32 int8 values = 34 bytes
             default: return 0;
         }
     }
@@ -749,31 +781,52 @@ void dequant_row_q6_K(const block_q6_K* blocks, float* output, int cols) {
     }
 }
 
+// Dequantize a single row from Q8_0 tensor (simple 8-bit quantization)
+void dequant_row_q8_0(const block_q8_0* blocks, float* output, int cols) {
+    int nb = cols / QK8_0;
+    for (int i = 0; i < nb; ++i) {
+        const float d = fp16_to_fp32(blocks[i].d);
+        for (int j = 0; j < QK8_0; ++j) {
+            output[i * QK8_0 + j] = d * blocks[i].qs[j];
+        }
+    }
+}
+
 // Dispatch dequantize row by type
 void dequant_row(const void* data, float* output, int cols, int rowIdx, GGML_DType qtype) {
-    int blocksPerRow = cols / QK_K;
+    int blocksPerRow;
     size_t bytesPerBlock = 0;
     
     switch (qtype) {
         case GGML_DType::Q2_K:
+            blocksPerRow = cols / QK_K;
             bytesPerBlock = sizeof(block_q2_K);
             dequant_row_q2_K((const block_q2_K*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
             break;
         case GGML_DType::Q3_K:
+            blocksPerRow = cols / QK_K;
             bytesPerBlock = sizeof(block_q3_K);
             dequant_row_q3_K((const block_q3_K*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
             break;
         case GGML_DType::Q4_K:
+            blocksPerRow = cols / QK_K;
             bytesPerBlock = sizeof(block_q4_K);
             dequant_row_q4_K((const block_q4_K*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
             break;
         case GGML_DType::Q5_K:
+            blocksPerRow = cols / QK_K;
             bytesPerBlock = sizeof(block_q5_K);
             dequant_row_q5_K((const block_q5_K*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
             break;
         case GGML_DType::Q6_K:
+            blocksPerRow = cols / QK_K;
             bytesPerBlock = sizeof(block_q6_K);
             dequant_row_q6_K((const block_q6_K*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
+            break;
+        case GGML_DType::Q8_0:
+            blocksPerRow = cols / QK8_0;
+            bytesPerBlock = sizeof(block_q8_0);
+            dequant_row_q8_0((const block_q8_0*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
             break;
         default:
             std::fill(output, output + cols, 0.0f);
@@ -997,6 +1050,20 @@ float vec_dot_q6_K(const float* x, const block_q6_K* y, int k) {
     return sumf;
 }
 
+// Q8_0: vec_dot - simple 8-bit quantization dot product
+float vec_dot_q8_0(const float* x, const block_q8_0* y, int k) {
+    const int nb = k / QK8_0;
+    float sumf = 0.0f;
+    
+    for (int i = 0; i < nb; ++i) {
+        const float d = fp16_to_fp32(y[i].d);
+        for (int j = 0; j < QK8_0; ++j) {
+            sumf += x[i * QK8_0 + j] * d * y[i].qs[j];
+        }
+    }
+    return sumf;
+}
+
 // ==================== CPU Quantized Matmul ====================
 // A: [M x K] activations (f32), W: QuantizedTensor [N x K], C: [M x N] output
 
@@ -1016,6 +1083,7 @@ void matmul_cpu_q2_K(const float* A, const QuantizedTensor& W, const float* bias
     }
 }
 
+static int matmul_q3k_call = 0;
 void matmul_cpu_q3_K(const float* A, const QuantizedTensor& W, const float* bias, 
                      float* C, int M, int N, int K) {
     const block_q3_K* wdata = (const block_q3_K*)W.cpuData;
@@ -1029,6 +1097,14 @@ void matmul_cpu_q3_K(const float* A, const QuantizedTensor& W, const float* bias
             sum += vec_dot_q3_K(rowA, wrow, K);
             C[m * N + n] = sum;
         }
+    }
+    
+    // Debug: print output for first Q projection call
+    if (matmul_q3k_call == 0 && N == 5120) {
+        printf("=== matmul_cpu_q3_K output (Q projection) ===\n");
+        printf("C[0:8]: %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+               C[0], C[1], C[2], C[3], C[4], C[5], C[6], C[7]);
+        matmul_q3k_call++;
     }
 }
 
@@ -1075,6 +1151,22 @@ void matmul_cpu_q6_K(const float* A, const QuantizedTensor& W, const float* bias
             const block_q6_K* wrow = wdata + n * blocksPerRow;
             float sum = bias ? bias[n] : 0.0f;
             sum += vec_dot_q6_K(rowA, wrow, K);
+            C[m * N + n] = sum;
+        }
+    }
+}
+
+void matmul_cpu_q8_0(const float* A, const QuantizedTensor& W, const float* bias, 
+                     float* C, int M, int N, int K) {
+    const block_q8_0* wdata = (const block_q8_0*)W.cpuData;
+    int blocksPerRow = K / QK8_0;
+    
+    for (int m = 0; m < M; ++m) {
+        const float* rowA = A + m * K;
+        for (int n = 0; n < N; ++n) {
+            const block_q8_0* wrow = wdata + n * blocksPerRow;
+            float sum = bias ? bias[n] : 0.0f;
+            sum += vec_dot_q8_0(rowA, wrow, K);
             C[m * N + n] = sum;
         }
     }
@@ -1404,8 +1496,9 @@ __global__ void applyRoPEKernelQ(float* Q, int seqLen, int numHeads, int headDim
     int i = threadIdx.x * 2;
     
     if (pos < seqLen && h < numHeads && i + 1 < headDim) {
-        float theta = powf(ropeTheta, -2.0f * i / headDim);
-        float angle = (float)pos * theta;
+        // freq = 1 / theta^(i/d) where i is dimension index (0, 2, 4, ...)
+        float freq = 1.0f / powf(ropeTheta, (float)i / (float)headDim);
+        float angle = (float)pos * freq;
         float cosAngle = cosf(angle);
         float sinAngle = sinf(angle);
         
@@ -1426,8 +1519,9 @@ __global__ void applyRoPEKernelK(float* K, int seqLen, int numKVHeads, int headD
     int i = threadIdx.x * 2;
     
     if (pos < seqLen && h < numKVHeads && i + 1 < headDim) {
-        float theta = powf(ropeTheta, -2.0f * i / headDim);
-        float angle = (float)pos * theta;
+        // freq = 1 / theta^(i/d) where i is dimension index (0, 2, 4, ...)
+        float freq = 1.0f / powf(ropeTheta, (float)i / (float)headDim);
+        float angle = (float)pos * freq;
         float cosAngle = cosf(angle);
         float sinAngle = sinf(angle);
         
@@ -1685,7 +1779,7 @@ __global__ void matmul_q3_K_kernel(const float* __restrict__ A,
     
     for (int b = 0; b < blocksPerRow; ++b) {
         const float d_all = device_fp16_to_fp32(wrow[b].d);
-        const uint8_t* qs = wrow[b].qs;
+        const uint8_t* q = wrow[b].qs;
         const uint8_t* hm = wrow[b].hmask;
         
         uint32_t aux[4];
@@ -1697,19 +1791,27 @@ __global__ void matmul_q3_K_kernel(const float* __restrict__ A,
         aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
         const int8_t* scales = (const int8_t*)aux;
         
+        uint8_t hmask = 1;
         int is = 0;
+        int xidx = b * QK_K;
+        
         for (int n_blk = 0; n_blk < QK_K; n_blk += 128) {
+            int shift = 0;
             for (int j = 0; j < 4; ++j) {
                 float dl = d_all * (scales[is++] - 32);
-                for (int l = 0; l < 32; ++l) {
-                    int idx = b * QK_K + n_blk + j * 32 + l;
-                    int local_idx = n_blk + j * 32 + l;
-                    int q = ((qs[local_idx/4] >> ((local_idx % 4) * 2)) & 3);
-                    int h = (hm[local_idx/8] >> (local_idx % 8)) & 1;
-                    q = q - (h ? 0 : 4);
-                    sum += rowA[idx] * dl * q;
+                for (int l = 0; l < 16; ++l) {
+                    int qval = ((q[l] >> shift) & 3) - ((hm[l] & hmask) ? 0 : 4);
+                    sum += rowA[xidx + n_blk + j*32 + l] * dl * qval;
                 }
+                dl = d_all * (scales[is++] - 32);
+                for (int l = 0; l < 16; ++l) {
+                    int qval = ((q[l+16] >> shift) & 3) - ((hm[l+16] & hmask) ? 0 : 4);
+                    sum += rowA[xidx + n_blk + j*32 + 16 + l] * dl * qval;
+                }
+                shift += 2;
+                hmask <<= 1;
             }
+            q += 32;
         }
     }
     C[m * N + n] = sum;
@@ -1891,6 +1993,39 @@ void matmul_gpu_f32(const float* A, const float* W, const float* bias,
     CUDA_CHECK(cudaGetLastError());
 }
 
+// Q8_0 GPU kernel - simple 8-bit quantization
+__global__ void matmul_q8_0_kernel(const float* __restrict__ A, 
+                                    const block_q8_0* __restrict__ W,
+                                    const float* __restrict__ bias,
+                                    float* __restrict__ C,
+                                    int M, int N, int K, int blocksPerRow) {
+    int m = blockIdx.y * blockDim.y + threadIdx.y;
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (m >= M || n >= N) return;
+    
+    float sum = bias ? bias[n] : 0.0f;
+    const float* rowA = A + m * K;
+    const block_q8_0* wrow = W + n * blocksPerRow;
+    
+    for (int b = 0; b < blocksPerRow; ++b) {
+        const float d = device_fp16_to_fp32(wrow[b].d);
+        for (int j = 0; j < QK8_0; ++j) {
+            sum += rowA[b * QK8_0 + j] * d * wrow[b].qs[j];
+        }
+    }
+    C[m * N + n] = sum;
+}
+
+void matmul_gpu_q8_0(const float* A, const QuantizedTensor& W, const float* bias,
+                     float* C, int M, int N, int K) {
+    int blocksPerRow = K / QK8_0;
+    dim3 blockDim(16, 16);
+    dim3 gridDim((N + 15) / 16, (M + 15) / 16);
+    matmul_q8_0_kernel<<<gridDim, blockDim>>>(A, (const block_q8_0*)W.gpuData, bias, C, M, N, K, blocksPerRow);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 // ==================== Unified linear_forward Dispatch ====================
 // Dispatches to appropriate CPU or GPU quantized matmul based on weight type and device
 
@@ -1913,7 +2048,52 @@ void linear_forward(const float* A, const QuantizedTensor& W, const float* bias,
         linear_forward_count++;
     }
     
-    // Test vec_dot vs dequant once for Q3_K
+    // Test vec_dot vs dequant once for Q8_0 or Q3_K
+    if (!vec_dot_tested && W.qtype == GGML_DType::Q8_0 && device == DeviceType::CPU && W.cpuData) {
+        vec_dot_tested = true;
+        const block_q8_0* wdata = (const block_q8_0*)W.cpuData;
+        int blocksPerRow = K / QK8_0;
+        
+        // Test for row 0
+        std::vector<float> dequant_row(K);
+        dequant_row_q8_0(wdata, dequant_row.data(), K);
+        
+        // Compute dot product manually
+        float manual_dot = 0.0f;
+        for (int i = 0; i < K; i++) {
+            manual_dot += A[i] * dequant_row[i];
+        }
+        
+        // Compute using vec_dot
+        float vec_dot_result = vec_dot_q8_0(A, wdata, K);
+        
+        printf("=== Q8_0 VEC_DOT TEST (row 0) ===\n");
+        printf("dequant[0:4]: %.4f %.4f %.4f %.4f\n", dequant_row[0], dequant_row[1], dequant_row[2], dequant_row[3]);
+        printf("Input A[0:4]: %.4f %.4f %.4f %.4f\n", A[0], A[1], A[2], A[3]);
+        printf("manual_dot (via dequant): %.6f\n", manual_dot);
+        printf("vec_dot_q8_0:             %.6f\n", vec_dot_result);
+        printf("Difference:               %.6e\n", fabsf(manual_dot - vec_dot_result));
+        
+        // Also test row 1
+        const block_q8_0* row1 = wdata + blocksPerRow;
+        std::vector<float> dequant_row1(K);
+        dequant_row_q8_0(row1, dequant_row1.data(), K);
+        
+        float manual_dot1 = 0.0f;
+        for (int i = 0; i < K; i++) {
+            manual_dot1 += A[i] * dequant_row1[i];
+        }
+        float vec_dot_result1 = vec_dot_q8_0(A, row1, K);
+        
+        printf("=== Q8_0 VEC_DOT TEST (row 1) ===\n");
+        printf("dequant[0:4]: %.4f %.4f %.4f %.4f\n", dequant_row1[0], dequant_row1[1], dequant_row1[2], dequant_row1[3]);
+        printf("manual_dot (via dequant): %.6f\n", manual_dot1);
+        printf("vec_dot_q8_0:             %.6f\n", vec_dot_result1);
+        printf("Difference:               %.6e\n", fabsf(manual_dot1 - vec_dot_result1));
+        printf("Row 0 vs Row 1 differ:    %s\n", (dequant_row[0] != dequant_row1[0]) ? "YES" : "NO (PROBLEM!)");
+        printf("====================\n");
+    }
+    
     if (!vec_dot_tested && W.qtype == GGML_DType::Q3_K && device == DeviceType::CPU && W.cpuData) {
         vec_dot_tested = true;
         const block_q3_K* wdata = (const block_q3_K*)W.cpuData;
@@ -1932,12 +2112,30 @@ void linear_forward(const float* A, const QuantizedTensor& W, const float* bias,
         // Compute using vec_dot
         float vec_dot_result = vec_dot_q3_K(A, wdata, K);
         
-        printf("=== VEC_DOT TEST ===\n");
+        printf("=== VEC_DOT TEST (row 0) ===\n");
         printf("dequant[0:4]: %.4f %.4f %.4f %.4f\n", dequant_row[0], dequant_row[1], dequant_row[2], dequant_row[3]);
         printf("Input A[0:4]: %.4f %.4f %.4f %.4f\n", A[0], A[1], A[2], A[3]);
         printf("manual_dot (via dequant): %.6f\n", manual_dot);
         printf("vec_dot_q3_K:             %.6f\n", vec_dot_result);
         printf("Difference:               %.6f\n", fabsf(manual_dot - vec_dot_result));
+        
+        // Also test row 1
+        const block_q3_K* row1 = wdata + blocksPerRow;  // Row 1
+        float dequant_row1[5120];
+        dequant_row_q3_K(row1, dequant_row1, K);
+        
+        float manual_dot1 = 0.0f;
+        for (int i = 0; i < K; i++) {
+            manual_dot1 += A[i] * dequant_row1[i];
+        }
+        float vec_dot_result1 = vec_dot_q3_K(A, row1, K);
+        
+        printf("=== VEC_DOT TEST (row 1) ===\n");
+        printf("dequant[0:4]: %.4f %.4f %.4f %.4f\n", dequant_row1[0], dequant_row1[1], dequant_row1[2], dequant_row1[3]);
+        printf("manual_dot (via dequant): %.6f\n", manual_dot1);
+        printf("vec_dot_q3_K:             %.6f\n", vec_dot_result1);
+        printf("Difference:               %.6f\n", fabsf(manual_dot1 - vec_dot_result1));
+        printf("Row 0 vs Row 1 differ:    %s\n", (dequant_row[0] != dequant_row1[0]) ? "YES" : "NO (PROBLEM!)");
         printf("====================\n");
     }
     
@@ -1959,6 +2157,7 @@ void linear_forward(const float* A, const QuantizedTensor& W, const float* bias,
             case GGML_DType::Q4_K: matmul_gpu_q4_K(A, W, bias, C, M, N, K); break;
             case GGML_DType::Q5_K: matmul_gpu_q5_K(A, W, bias, C, M, N, K); break;
             case GGML_DType::Q6_K: matmul_gpu_q6_K(A, W, bias, C, M, N, K); break;
+            case GGML_DType::Q8_0: matmul_gpu_q8_0(A, W, bias, C, M, N, K); break;
             default:
                 std::cerr << "ERROR: Unsupported GPU quant type " << (int)W.qtype << std::endl;
                 break;
@@ -1970,6 +2169,7 @@ void linear_forward(const float* A, const QuantizedTensor& W, const float* bias,
             case GGML_DType::Q4_K: matmul_cpu_q4_K(A, W, bias, C, M, N, K); break;
             case GGML_DType::Q5_K: matmul_cpu_q5_K(A, W, bias, C, M, N, K); break;
             case GGML_DType::Q6_K: matmul_cpu_q6_K(A, W, bias, C, M, N, K); break;
+            case GGML_DType::Q8_0: matmul_cpu_q8_0(A, W, bias, C, M, N, K); break;
             default:
                 std::cerr << "ERROR: Unsupported CPU quant type " << (int)W.qtype << std::endl;
                 break;
@@ -2768,6 +2968,10 @@ private:
     std::vector<std::string> idToToken;
     int vocabSize = 0;
     bool loaded = false;
+    
+    // BPE merge rules
+    std::vector<std::pair<std::string, std::string>> bpeMerges;
+    std::unordered_map<std::string, int> mergePriority;  // merge_str -> priority (lower = earlier)
 
 public:
     bool loadFromFile(const std::string& filename) {
@@ -2867,13 +3071,21 @@ public:
             tokenToID[tokens[i]] = i;
         }
         
-        // Note: merges are used for BPE encoding but our simple encoder doesn't use them yet
-        // For full BPE support, we'd need to implement merge-based tokenization
-        (void)merges;  // Suppress unused warning
+        // Parse BPE merges - each merge is "token1 token2" format
+        for (size_t i = 0; i < merges.size(); i++) {
+            const std::string& merge = merges[i];
+            size_t spacePos = merge.find(' ');
+            if (spacePos != std::string::npos) {
+                std::string t1 = merge.substr(0, spacePos);
+                std::string t2 = merge.substr(spacePos + 1);
+                bpeMerges.push_back({t1, t2});
+                mergePriority[merge] = i;  // Earlier merges have lower priority value
+            }
+        }
         
         loaded = vocabSize > 0;
         if (loaded)
-            std::cout << "Tokenizer loaded from GGUF: " << vocabSize << " tokens" << std::endl;
+            std::cout << "Tokenizer loaded from GGUF: " << vocabSize << " tokens, " << bpeMerges.size() << " merges" << std::endl;
         
         return loaded;
     }
@@ -2889,34 +3101,102 @@ public:
         return "";
     }
 
+    // BPE encode: apply merges iteratively until no more merges possible
     std::vector<int> encode(const std::string& text) const {
         std::vector<int> result;
         if (!loaded) return result;
 
-        std::vector<std::string> tokens;
+        // Split text into words, handling spaces with special token
+        std::vector<std::string> words;
         std::string currentWord;
-
-        for (char ch : text) {
+        
+        for (size_t i = 0; i < text.size(); i++) {
+            char ch = text[i];
             if (ch == ' ') {
-                if (!currentWord.empty())
-                    tokens.push_back(currentWord);
-                currentWord = "\xC4\xA0";
+                if (!currentWord.empty()) {
+                    words.push_back(currentWord);
+                    currentWord.clear();
+                }
+                // Next word starts with space marker (▁ = \xE2\x96\x81 for SentencePiece, \xC4\xA0 for GPT)
+                currentWord = "\xE2\x96\x81";
             } else {
                 currentWord += ch;
             }
         }
         if (!currentWord.empty())
-            tokens.push_back(currentWord);
+            words.push_back(currentWord);
 
-        for (const auto& token : tokens) {
-            int id = getTokenID(token);
-            if (id >= 0) {
-                result.push_back(id);
-            } else {
-                for (char c : token) {
-                    std::string charStr(1, c);
-                    id = getTokenID(charStr);
-                    if (id >= 0) result.push_back(id);
+        // Process each word with BPE
+        for (const auto& word : words) {
+            // First try to find the word as a single token
+            int wholeWordId = getTokenID(word);
+            if (wholeWordId >= 0) {
+                result.push_back(wholeWordId);
+                continue;
+            }
+            
+            // Also try with GPT-style space marker
+            std::string gptWord = word;
+            if (!gptWord.empty() && gptWord.substr(0, 3) == "\xE2\x96\x81") {
+                gptWord = "\xC4\xA0" + gptWord.substr(3);
+                wholeWordId = getTokenID(gptWord);
+                if (wholeWordId >= 0) {
+                    result.push_back(wholeWordId);
+                    continue;
+                }
+            }
+            
+            // Split into characters and apply BPE
+            std::vector<std::string> tokens;
+            for (size_t i = 0; i < word.size(); ) {
+                // Handle UTF-8 multi-byte characters
+                unsigned char c = word[i];
+                int charLen = 1;
+                if ((c & 0xE0) == 0xC0) charLen = 2;
+                else if ((c & 0xF0) == 0xE0) charLen = 3;
+                else if ((c & 0xF8) == 0xF0) charLen = 4;
+                
+                tokens.push_back(word.substr(i, charLen));
+                i += charLen;
+            }
+            
+            // Apply BPE merges iteratively
+            while (tokens.size() > 1) {
+                int bestIdx = -1;
+                int bestPriority = INT_MAX;
+                
+                // Find the highest priority (lowest index) merge that can be applied
+                for (size_t i = 0; i < tokens.size() - 1; i++) {
+                    std::string mergeKey = tokens[i] + " " + tokens[i+1];
+                    auto it = mergePriority.find(mergeKey);
+                    if (it != mergePriority.end() && it->second < bestPriority) {
+                        bestPriority = it->second;
+                        bestIdx = i;
+                    }
+                }
+                
+                if (bestIdx < 0) break;  // No more merges possible
+                
+                // Apply the merge
+                tokens[bestIdx] = tokens[bestIdx] + tokens[bestIdx + 1];
+                tokens.erase(tokens.begin() + bestIdx + 1);
+            }
+            
+            // Convert tokens to IDs
+            for (const auto& tok : tokens) {
+                int id = getTokenID(tok);
+                if (id >= 0) {
+                    result.push_back(id);
+                } else {
+                    // Fall back to byte-level encoding for unknown tokens
+                    for (unsigned char c : tok) {
+                        // Try to find the byte token
+                        std::string byteStr(1, c);
+                        id = getTokenID(byteStr);
+                        if (id >= 0) {
+                            result.push_back(id);
+                        }
+                    }
                 }
             }
         }
@@ -3570,10 +3850,11 @@ public:
         GGUFTensor& t = tensors[it->second];
         
         // Calculate dimensions
+        // GGUF stores tensors in row-major with shape[0] being columns (K), shape[1] being rows (N)
         int rows = 1, cols = 1;
         if (t.numDims >= 2) {
-            cols = t.shape[0];  // K dimension (inner)
-            rows = t.shape[1];  // N dimension (outer)
+            cols = t.shape[0];  // K dimension (in_features)
+            rows = t.shape[1];  // N dimension (out_features)
         } else if (t.numDims == 1) {
             cols = t.shape[0];
             rows = 1;
@@ -4081,6 +4362,13 @@ private:
                 h_hidden[pos * embedDim + i] = val;
             }
         }
+        // Debug: print embeddings for each position
+        printf("=== EMBEDDINGS DEBUG (seqLen=%d) ===\n", seqLen);
+        for (int pos = 0; pos < seqLen; pos++) {
+            printf("h_hidden[pos=%d][0:4]: %.4f %.4f %.4f %.4f (tokenID=%d)\n", 
+                   pos, h_hidden[pos*embedDim], h_hidden[pos*embedDim+1], 
+                   h_hidden[pos*embedDim+2], h_hidden[pos*embedDim+3], tokenIDs[pos]);
+        }
     }
 
     void embedTokens(const std::vector<int>& tokenIDs, int seqLen) {
@@ -4274,6 +4562,45 @@ private:
             projection(attnOut, projWF, projBF, hidden_out, hidden_in, seqLen, embedDim, device, BLOCK_SIZE);
         }
         
+        // Debug: print attention output for layer 0 and last layer
+        if ((layerIdx == 0 || layerIdx == numLayers - 1) && device == DeviceType::CPU) {
+            printf("=== ATTN L%d (seqLen=%d) ===\n", layerIdx, seqLen);
+            printf("Q[pos=0][0:4]: %.4f %.4f %.4f %.4f\n", Q[0], Q[1], Q[2], Q[3]);
+            if (seqLen > 1) {
+                int qPos1 = 1 * numHeads * headDim;
+                printf("Q[pos=1][0:4]: %.4f %.4f %.4f %.4f\n", Q[qPos1], Q[qPos1+1], Q[qPos1+2], Q[qPos1+3]);
+            }
+            printf("K[pos=0][0:4]: %.4f %.4f %.4f %.4f\n", K[0], K[1], K[2], K[3]);
+            if (seqLen > 1) {
+                int kPos1 = 1 * numKVHeads * headDim;
+                printf("K[pos=1][0:4]: %.4f %.4f %.4f %.4f\n", K[kPos1], K[kPos1+1], K[kPos1+2], K[kPos1+3]);
+            }
+            printf("V[pos=0][0:4]: %.4f %.4f %.4f %.4f\n", V[0], V[1], V[2], V[3]);
+            if (seqLen > 1) {
+                int vPos1 = 1 * numKVHeads * headDim;
+                printf("V[pos=1][0:4]: %.4f %.4f %.4f %.4f\n", V[vPos1], V[vPos1+1], V[vPos1+2], V[vPos1+3]);
+            }
+            // After softmax: scores[h, pos, srcPos] at h=0
+            printf("attnWeights h=0 pos=0 [0:seqLen]: ");
+            for (int i = 0; i < seqLen && i < 4; i++) printf("%.4f ", attnScores[i]);
+            printf("\n");
+            if (seqLen > 1) {
+                printf("attnWeights h=0 pos=1 [0:seqLen]: ");
+                for (int i = 0; i < seqLen && i < 4; i++) printf("%.4f ", attnScores[seqLen + i]);
+                printf("\n");
+            }
+            printf("attnOut[pos=0][0:4]: %.4f %.4f %.4f %.4f\n", attnOut[0], attnOut[1], attnOut[2], attnOut[3]);
+            if (seqLen > 1) {
+                int outPos1 = 1 * numHeads * headDim;
+                printf("attnOut[pos=1][0:4]: %.4f %.4f %.4f %.4f\n", attnOut[outPos1], attnOut[outPos1+1], attnOut[outPos1+2], attnOut[outPos1+3]);
+            }
+            printf("hidden_out[pos=0][0:4]: %.4f %.4f %.4f %.4f\n", hidden_out[0], hidden_out[1], hidden_out[2], hidden_out[3]);
+            if (seqLen > 1) {
+                printf("hidden_out[pos=1][0:4]: %.4f %.4f %.4f %.4f\n", hidden_out[embedDim], hidden_out[embedDim+1], hidden_out[embedDim+2], hidden_out[embedDim+3]);
+            }
+            printf("===============================\n");
+        }
+        
         // Swap hidden states
         std::swap(hidden_in, hidden_out);
         if (device == DeviceType::GPU) {
@@ -4455,7 +4782,8 @@ private:
     std::vector<float> computeLogits(int seqLen) {
         std::vector<std::string> lnGNames = {"output_norm.weight", "ln_f.weight"};
         std::vector<std::string> lnBNames = {"output_norm.bias", "ln_f.bias"};
-        std::vector<std::string> embNames = {"token_embd.weight", "wte.weight"};
+        // For logits, try output.weight first (LLaMA/TinyLlama), fall back to token_embd.weight (GPT-2/tied weights)
+        std::vector<std::string> outputNames = {"output.weight", "lm_head.weight", "token_embd.weight", "wte.weight"};
         
         DeviceType device = cpuOnly ? DeviceType::CPU : DeviceType::GPU;
         
@@ -4465,8 +4793,8 @@ private:
         float* lnG = lnGQ ? (device == DeviceType::GPU ? lnGQ->gpuFloat : lnGQ->cpuFloat) : nullptr;
         float* lnB = lnBQ ? (device == DeviceType::GPU ? lnBQ->gpuFloat : lnBQ->cpuFloat) : nullptr;
         
-        // Get token embeddings (may be quantized)
-        QuantizedTensor* tokenEmbQ = loader.getQuantizedTensor(embNames, device);
+        // Get output projection weights (may be quantized)
+        QuantizedTensor* tokenEmbQ = loader.getQuantizedTensor(outputNames, device);
         
         if (cpuOnly) {
             // Apply normalization on CPU (RMSNorm for ROPE, LayerNorm for GPT-2)
@@ -4510,15 +4838,36 @@ private:
             
             std::vector<float> logits(vocabSize);
             
+            // Debug: print final hidden and normed values
+            printf("=== LOGITS DEBUG (seqLen=%d) ===\n", seqLen);
+            printf("lastHidden[0:4] at pos %d: %.4f %.4f %.4f %.4f\n", seqLen-1, lastHidden[0], lastHidden[1], lastHidden[2], lastHidden[3]);
+            printf("normed[0:4]: %.4f %.4f %.4f %.4f\n", normed[0], normed[1], normed[2], normed[3]);
+            
             if (tokenEmbQ && tokenEmbQ->isQuantized()) {
                 // Quantized logits: normed [1 x E] @ tokenEmb^T [E x V] = [1 x V]
                 // tokenEmb is [V x E], we need [1 x E] @ [V x E]^T = sum over E
+                printf("tokenEmb: rows=%d cols=%d qtype=%d\n", tokenEmbQ->rows, tokenEmbQ->cols, (int)tokenEmbQ->qtype);
                 linear_forward(normed.data(), *tokenEmbQ, nullptr, logits.data(), 1, vocabSize, embedDim, DeviceType::CPU);
+                printf("logits[0:5]: %.4f %.4f %.4f %.4f %.4f\n", logits[0], logits[1], logits[2], logits[3], logits[4]);
+                printf("logits[9707]: %.4f (Hello token)\n", logits[9707]);
+                printf("logits[11489]: %.4f (wait token)\n", logits[11489]);
+                printf("logits[3681]: %.4f (Paris token)\n", logits[3681]);
+                
+                // Compute expected logit for token 11489 manually by dequanting embedding row
+                std::vector<float> emb_row(embedDim);
+                dequant_row(tokenEmbQ->cpuData, emb_row.data(), embedDim, 11489, tokenEmbQ->qtype);
+                float manual_logit = 0.0f;
+                for (int i = 0; i < embedDim; i++) {
+                    manual_logit += normed[i] * emb_row[i];
+                }
+                printf("manual logits[11489]: %.4f\n", manual_logit);
+                printf("emb_row[0:4]: %.4f %.4f %.4f %.4f\n", emb_row[0], emb_row[1], emb_row[2], emb_row[3]);
+                printf("================================\n");
             } else {
                 // F32 path
                 float* tokenEmb = tokenEmbQ ? tokenEmbQ->cpuFloat : nullptr;
                 if (!tokenEmb) {
-                    tokenEmb = loader.getTensorCPU(embNames);
+                    tokenEmb = loader.getTensorCPU(outputNames);
                 }
                 for (int v = 0; v < vocabSize; v++) {
                     float sum = 0.0f;
@@ -4556,7 +4905,7 @@ private:
                 // F32 GPU path
                 float* d_tokenEmb = tokenEmbQ ? tokenEmbQ->gpuFloat : nullptr;
                 if (!d_tokenEmb) {
-                    d_tokenEmb = loader.getTensorGPU(embNames);
+                    d_tokenEmb = loader.getTensorGPU(outputNames);
                 }
                 
                 dim3 block(BLOCK_SIZE);
@@ -4592,6 +4941,7 @@ private:
         for (int l = 0; l < numLayers; l++) {
             DeviceType dev = layerDeviceConfig->getDevice(l);
             std::cout << "\rLayer " << (l + 1) << "/" << numLayers << " [" << (dev == DeviceType::GPU ? "GPU" : "CPU") << "]..." << std::flush;
+            
             attentionBlock(seqLen, l);
             ffnBlock(seqLen, l);
         }
@@ -4768,6 +5118,13 @@ public:
 
         std::cout << "Encoding prompt..." << std::endl;
         auto tokenIDs = tokenizer.encode(prompt);
+        
+        // Prepend BOS token for LLaMA/TinyLlama models (token 1 = <s>)
+        if (posEmbedding == PositionalEmbedding::ROPE) {
+            tokenIDs.insert(tokenIDs.begin(), 1);  // BOS token
+            std::cout << "Added BOS token (ID=1)" << std::endl;
+        }
+        
         std::cout << "Input tokens: " << tokenIDs.size() << std::endl;
         std::cout << "Temperature: " << std::fixed << std::setprecision(2) << temperature << std::endl;
 
@@ -4801,6 +5158,23 @@ public:
                     bestLogit = logits[j];
                     bestID = j;
                 }
+            }
+            
+            // Debug: print top 5 logits
+            if (i == 0) {
+                std::vector<std::pair<float, int>> sorted_logits;
+                for (size_t j = 0; j < logits.size(); j++) {
+                    sorted_logits.push_back({logits[j], (int)j});
+                }
+                std::sort(sorted_logits.begin(), sorted_logits.end(), [](const std::pair<float,int>& a, const std::pair<float,int>& b) { return a.first > b.first; });
+                printf("=== TOP 10 LOGITS ===\n");
+                for (int k = 0; k < 10; k++) {
+                    printf("%d: token=%d (\"%s\") logit=%.4f\n", 
+                           k+1, sorted_logits[k].second, 
+                           tokenizer.getIDToken(sorted_logits[k].second).c_str(),
+                           sorted_logits[k].first);
+                }
+                printf("=====================\n");
             }
 
             int selectedID;
