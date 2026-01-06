@@ -2,8 +2,12 @@
 
 **Author:** Matthew Abbott (2025)
 
-A modern, fully-transparent CUDA implementation of Transformer language models—targeting *maximum hackability and educational clarity*.  
-This project provides modular GPU-accelerated transformer inference, agentic inspection, and interactive CLI/GUI, with direct GGUF model support.
+A modern, fully-transparent CUDA implementation of Transformer language models—targeting *maximum hackability and educational clarity*. This project provides:
+
+- **transformer.cu:** Direct, efficient CUDA implementation of a GPT-2/LLM Transformer, including GGUF model loading and custom tokenizer.
+- **facaded_transformer.cu:** A detailed C++17/CUDA inspection and manipulation facade, with tools for deep model analysis and full introspection of all tensors, weights, and internal states.
+
+Both are designed for **GPU-first research, tinkering, and instruction**—not "black box" deployment, but as stepping stones for developing and understanding transformer language models.
 
 ---
 
@@ -11,162 +15,181 @@ This project provides modular GPU-accelerated transformer inference, agentic ins
 
 - [Features](#features)
 - [Requirements](#requirements)
-- [agentic_transformer.cu (Agentic Universal Transformer)](#agentic_transformercu-agentic-universal-transformer)
-  - [Design](#design-agentic)
-  - [Quantization Support](#quantization-support)
-  - [Device Offloading](#device-offloading)
-  - [Usage & API](#usage-api-agentic)
-- [transformer_gui.py (Interactive CLI GUI)](#transformer_guipy-interactive-cli-gui)
-  - [Features](#features-gui)
-  - [Usage](#usage-gui)
-- [transformer.cu (Standard Transformer)](#transformercu-standard-transformer)
+- [transformer.cu](#transformercu)
   - [Design](#design)
   - [Usage](#usage)
   - [Arguments](#arguments)
   - [Public Methods](#public-methods)
 - [facaded_transformer.cu (Transformer Facade)](#facaded_transformercu-transformer-facade)
-  - [Design](#facade-design)
-  - [Usage](#facade-usage)
-  - [Arguments](#facade-arguments)
-  - [Public Methods](#facade-methods)
+  - [Design](#design-1)
+  - [Usage](#usage-1)
+  - [Arguments](#arguments-1)
+  - [Public Methods](#public-methods-1)
 - [Data Structures & Format](#data-structures--format)
 - [Overview & Notes](#overview--notes)
-- [License](#license)
 
 ---
 
 ## Features
 
-- **Direct GGUF Model Loading:**  Loads GGUF weights/tensors "by hand" for full transparency.
-- **CUDA-Accelerated Inference:**  Matrix ops, quantization, attention, softmax and FFN all implemented in device code.
-- **Universal Quantized Model Support:**  Full support for all K-quants (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K), plus legacy formats, with modular code to extend to future quantization types (K_M, K_L, K_S).
-- **Agentic Inspection & Manipulation:**  Exposes all activations, weights, inputs/outputs by layer and token for advanced debugging, visualization, or agentic control.
-- **Interactive CLI and GUI:**  Chat, batch inference, benchmarking, quant stats, and file management.
-- **Custom Tokenizer Support:**  Loads GPT-2 compatible vocabularies.
-- **MIT License.**  All source is open for modification and commercial/academic/educational use.
+- **Direct GGUF Model Loading:** No external deps—loads GGUF weights/tensors "by hand".
+- **CUDA-Accelerated Transformer Inference:** All matrix, normalization, QKV, attention, softmax, and FFN biological in CUDA.
+- **Custom Tokenizer Support:** Loads vocab from GPT-2 compatible tokenizers.
+- **GPU-efficient memory management, sequence batching, and buffer allocation.**
+- **Temperature sampling, max-logit, and token generation in CLI.**
+- **All tensors and attention available for user inspection.**
+- **Facade includes: Stepwise/debug-inspect attention, FFN, residuals, and all embeddings.**
+- **No icons or logos—just source and docs.**
+- **License:** MIT
 
 ---
 
 ## Requirements
 
-- NVIDIA GPU with CUDA (compute 6.0+ recommended)
+- NVIDIA GPU with CUDA (compute 6.0+ highly recommended)
 - CUDA toolkit (tested with CUDA 11-12+)
-- C++14 (main) or C++17 for advanced facade features
-- Python 3.6+ for GUI frontend
-- GGUF model weights (float32, float16, bfloat16, or quantized)
+- C++14 (main) or C++17 (facade) for optional features
+- [GGUF](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) model weights (convert from HuggingFace etc. with suitable scripts)
 - **No external deep learning library required**
 
 ---
 
-## agentic_transformer.cu (Agentic Universal Transformer)
+## transformer.cu
 
 ### Design
 
-A transparent, introspectable GGUF transformer core with agentic hooks, designed for universal quantized inference and fine-grained layer/device inspection.
+Implements a full Transformer LLM from first principles for GPU in a single file:
 
-- **Full Quantization Registry:**  Implements all llama.cpp-style K-quants (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K) with accurate block layout and dequantization, plus legacy quant formats (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0).
-- **Device Offloading:**  Per-layer configurable GPU/CPU device assignment so you can selectively offload layers for memory/concurrency benchmarking.
-- **Layer, Token & Activation Inspection:**  Exposes all internal states—hidden states, attention weights/logits, QKV, residuals, FFN output, normalization—at every step.
-- **Open Kernel Design:**  All math (RoPE, matmul, GELU, RMSNorm, etc.) is visible for modification and debugging.
-- **MIT License**: Fully open for commercial/research/educational extension.
-
-#### Quantization Support
-
-- Complete and extensible support for K-quants (`Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`).
-- Legacy/compat formats (`Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`) for older GGUF models.
-- Modular dequantization dispatch—ready to add new quant types (like K_M, K_L, K_S) as they appear; just match the tensor metadata and plug in your block logic.
-
-#### Device Offloading
-
-- Flexible `LayerDeviceConfig`: Assign GPU or CPU to each transformer layer, for performance profiling or hybrid runs.
-- Unified dispatch ensures correct routing of all matmul, normalization, and quant kernels per device.
-
-#### Usage & API
-
-Build:
-
-```bash
-nvcc -O3 -std=c++14 agentic_transformer.cu -o agentic_transformer
-```
-
-Basic command-line interface:
-
-```bash
-./agentic_transformer --model mymodel.gguf --tokenizer tokenizer.json --prompt "Hello world" --max-tokens 32
-```
-
-Inspect/override per-layer device (example in code comments):
-
-```bash
-./agentic_transformer --model model.gguf --cpu-layers 0,1,2    # Offload first 3 layers to CPU
-```
-
-Access all activations using the exposed API, or connect to the Python CLI for advanced inspection.
-
----
-
-## transformer_gui.py (Interactive CLI GUI)
-
-### Features
-
-- Terminal-based GUI for running and controlling CUDA transformer inference.
-- Supports all common model loading, generation, file management, benchmarking, and quant/stat commands.
-- Color-coded status, help, and error messages.
-- Conversation history and log saving for chat sessions.
-- Direct compilation/management of CUDA source files.
-- Model inspection: tensor listing, quantization statistics, benchmarking.
+- Loads GGUF file, locates all relevant layers and tensors
+- Loads GPT-2 compatible vocab/tokenizer
+- Allocates and manages all working tensors on the GPU
+- Embedding, multi-head attention, residuals, layer norm, FFN (GELU), logits all in custom GPU kernels
+- CLI for model inference ("generation") from a prompt
 
 ### Usage
 
-Run:
-
 ```bash
-python3 transformer_gui.py
+nvcc -O3 -std=c++14 transformer.cu -o transformer_cuda
 ```
 
-Typical workflow:
-- Compile CUDA source (`compile`)
-- Load model (`load <model.gguf> [tokenizer.json]`)
-- Chat (`chat <prompt>`)
-- Inspect model info (`info`, `tensors`, `quant`, `benchmark`)
-- Manage files, settings, and logs interactively
+**Example (CLI):**
+```
+./transformer_cuda --model mymodel.gguf --tokenizer tokenizer.json --prompt "The quick brown fox" --max-tokens 64 --temperature 1.2
+```
+Features:
+- Can auto-detect GGUF config (embed size, n_layers, n_heads, ff_dim, vocab, etc.)
+- Works on single or batch prompts
 
-See `help` in the GUI for all commands.
+### Arguments
 
----
+#### Model/CLI Parameters
 
-## transformer.cu (Standard Transformer)
+- `--model`: Path to `*.gguf` transformer checkpoint
+- `--tokenizer`: Path to tokenizer JSON (GPT-2 vocab format)
+- `--prompt`: Text to be tokenized and completed/generated
+- `--max-tokens`: Maximum tokens to generate
+- `--temperature`: Sampling temperature for logits (float, default 1.0)
+- More CLI options for batch/generation/inference are available in code comments.
 
-*(Retained for ease of development, basic testing, and clarity—see original README sections for details.)*
+#### Model I/O
+
+- Model weights are expected to be in GGUF format (float32, float16, or bfloat16 supported).
+- Tokenizer should match model vocabulary.
+
+### Public Methods
+
+#### Class: `TransformerModel`
+
+- `bool loadModel(const std::string& path)`
+- `bool loadTokenizer(const std::string& path)`
+- `std::string generate(const std::string& prompt, int maxTokens, double temperature = 1.0)`
+  - Does both tokenization, forward/inference, and next-token sampling.
+- `std::vector<float> forward(const std::vector<int>& tokenIDs)`
+  - Runs forward pass and returns logits of last token for sampling
+
+#### GGUF/Tokenizer Access
+
+- GPU/CPU tensor accessor for all parameters (see `GGUFLoader` in code)
+- Custom Tokenizer: `encode(text)` and `decode(token_ids)` methods, with space-aware and fallback logic
 
 ---
 
 ## facaded_transformer.cu (Transformer Facade)
 
-*(Full detailed inspection and scientific visualization of all model states during inference—see original README sections for details.)*
+### Design
+
+A C++/CUDA introspection tool for the transformer. The facade class provides:
+
+- **Detailed per-layer access**: You can extract activations, attention logits/weights, all Q/K/V vectors, per-head results, layer normalizations, etc.
+- **Inspection, visualization, and manipulation ready**: All tensors are exported as CPU-side arrays for analysis/plotting.
+- **Designed for advanced curriculum, tinkering, and scientific reporting.**
+- **Pythonic API and maximal transparency!** No hidden states, all weights and inference steps are hackable.
+
+### Usage
+
+```bash
+nvcc -O3 -std=c++17 facaded_transformer.cu -o facadedtransformer_cuda -lcublas
+```
+(Tested with CUDA 11+, cublas required for some internal matmul)
+
+**Typical pattern:**
+- Load GGUF, tokenizer
+- Use `forward(tokenIds)` for a forward pass of your prompt
+- Access all intermediate states or weights for every step/layer
+
+### Arguments
+
+#### Facade Constructor & Main API
+
+- `bool loadModel(path)`
+- `bool loadTokenizer(path)`
+- `DoubleArray forward(const IntArray& tokenIds)`
+- `std::string generate(prompt, maxTokens, temperature)`
+- **Introspection functions:**
+  - Per-layer: Q/K/V matrices, attention logits/weights, hidden states/residuals
+  - Layer normalization, FFN, and GELU info
+  - Final logits, all output layers
+- `GGUFLoader` and `Tokenizer` available for low-level hacking
+- Model loader provides `getTensor("name")`, `printAllTensorNames()`, and configuration getters for:
+  - Embedding size, n_layers, n_heads, FFN size, vocab size, max context
+
+### Public Methods
+
+#### Class: `TransformerModel` (Facade)
+
+- `bool loadModel(const std::string& path)`
+- `bool loadTokenizer(const std::string& path)`
+- `DoubleArray forward(const IntArray& tokenIds)`
+- `std::string generate(const std::string& prompt, int maxTokens, double temperature = 1.0)`
+- Introspection:
+  - `getLastHiddenStates()`
+  - `getLastAttentionWeights()`, `getLastAttentionLogits()`
+  - `getLastQVectors()`, `getLastKVectors()`, `getLastVVectors()`
+  - `getLastLayerNormOutputs()`, `getLastFFNOutputs()`
+  - `getLastResidualInputs()`, `getLastResidualOutputs()`
+  - `getLastLogits()`
+- Model/weight access via `GGUFLoader`: fully documented in-code
 
 ---
 
 ## Data Structures & Format
 
-- **GGUFTensor / GGUFLoader:** Direct raw access to all GGUF weight tensors and configuration.
-- **Custom Tokenizer:** Loads and encodes/decodes vocab from JSON (GPT-2 format), or direct mapping.
-- All buffer designs support CPU-side extraction for debugging.
-- All quantization blocks and dequant logics commented and reference-accurate.
+- **GGUFTensor / GGUFLoader**: Loads, parses, and allows direct access to all tensors.
+- **Tokenizer**: Parses and encodes/decodes tokens from the JSON vocab format (GPT-2 compatible).
+- **CPU/GPU buffer design**: Designed so ALL major tensors and layers can be pulled to CPU at any time for debugging or display.
+- **Attention representations**: All head-level and intermediate states accessible after each forward pass.
 
 ---
 
 ## Overview & Notes
 
-- No icons, branding, or product logos.
-- All code is *deliberately hackable*—adapt for teaching, debugging, agentic interfaces, or plugin development.
-- Completely independent CUDA/C++—no third-party ML frameworks.
-- Designed for direct integration into larger agentic AI stacks, local RAG pipelines, or custom GGUF model workflows.
+- **No icons, branding, or product logos.** Docs and code only.
+- All source is *deliberately hackable*: you can change, inspect, or checkpoint any parameter/state.
+- For sequence/token input/output, see class comments and Python-like `encode`/`decode` helpers.
+- No third-party deep learning frameworks needed or used—*completely self-contained* CUDA/C++.
 
 ---
 
 ## License
 
-MIT License Copyright © 2025 Matthew Abbott
-
-> See LICENSE / header in each source file.
+MIT License, Copyright © 2025 Matthew Abbott
