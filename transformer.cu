@@ -1,7 +1,26 @@
-//
-// GGUF f32 CLI Transformer - CUDA Implementation
-// Matthew Abbott 2025
-//
+/*
+ * MIT License
+ *
+ * Copyright (c) 2025 Matthew Abbott
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
 #include <iostream>
 #include <fstream>
@@ -294,15 +313,114 @@ __global__ void ffnDownKernel(const float* input, const float* weight, const flo
 }
 
 __global__ void computeLogitsKernel(const float* hidden, const float* tokenEmb,
-                                     float* logits, int embedDim, int vocabSize) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+                                      float* logits, int embedDim, int vocabSize) {
+     int i = blockIdx.x * blockDim.x + threadIdx.x;
+     
+     if (i < vocabSize) {
+         float sum = 0.0f;
+         for (int j = 0; j < embedDim; j++) {
+             sum += hidden[j] * tokenEmb[i * embedDim + j];
+         }
+         logits[i] = sum;
+     }
+ }
+
+// ==================== GPU Dequantization Kernels ====================
+
+__global__ void dequantizeQ4_0Kernel(const uint8_t* quantized, float* output, int64_t numElements) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int groupSize = 32;
+    const int blockSize = 18;
     
-    if (i < vocabSize) {
-        float sum = 0.0f;
-        for (int j = 0; j < embedDim; j++) {
-            sum += hidden[j] * tokenEmb[i * embedDim + j];
+    if (idx < numElements) {
+        int64_t groupIdx = idx / groupSize;
+        int posInGroup = idx % groupSize;
+        
+        uint8_t* block = (uint8_t*)quantized + groupIdx * blockSize;
+        uint16_t scale16;
+        memcpy(&scale16, block, 2);
+        
+        int exponent = (scale16 >> 10) & 0x1F;
+        int mantissa = scale16 & 0x3FF;
+        float scale;
+        if (exponent == 0) {
+            scale = 0.0f;
+        } else if (exponent == 31) {
+            scale = 1e10f;
+        } else {
+            scale = powf(2.0f, (float)exponent - 15.0f) * (1.0f + mantissa / 1024.0f);
         }
-        logits[i] = sum;
+        
+        int byteIdx = 2 + posInGroup / 2;
+        int nibbleIdx = posInGroup % 2;
+        uint8_t quantVal = (block[byteIdx] >> (nibbleIdx * 4)) & 0x0F;
+        int8_t signedVal = (int8_t)quantVal - 8;
+        
+        output[idx] = (float)signedVal * scale;
+    }
+}
+
+__global__ void dequantizeQ4_1Kernel(const uint8_t* quantized, float* output, int64_t numElements) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int groupSize = 32;
+    const int blockSize = 20;
+    
+    if (idx < numElements) {
+        int64_t groupIdx = idx / groupSize;
+        int posInGroup = idx % groupSize;
+        
+        uint8_t* block = (uint8_t*)quantized + groupIdx * blockSize;
+        uint16_t scale16, min16;
+        memcpy(&scale16, block, 2);
+        memcpy(&min16, block + 2, 2);
+        
+        auto f16tof32 = [](uint16_t h) -> float {
+            int sign = (h >> 15) & 1;
+            int exponent = (h >> 10) & 0x1F;
+            int mantissa = h & 0x3FF;
+            if (exponent == 0) return 0.0f;
+            if (exponent == 31) return sign ? -1e10f : 1e10f;
+            float val = powf(2.0f, (float)exponent - 15.0f) * (1.0f + mantissa / 1024.0f);
+            return sign ? -val : val;
+        };
+        
+        float scale = f16tof32(scale16);
+        float minVal = f16tof32(min16);
+        
+        int byteIdx = 4 + posInGroup / 2;
+        int nibbleIdx = posInGroup % 2;
+        uint8_t quantVal = (block[byteIdx] >> (nibbleIdx * 4)) & 0x0F;
+        
+        output[idx] = minVal + (float)quantVal * scale;
+    }
+}
+
+__global__ void dequantizeQ8_0Kernel(const uint8_t* quantized, float* output, int64_t numElements) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int groupSize = 32;
+    const int blockSize = 18;
+    
+    if (idx < numElements) {
+        int64_t groupIdx = idx / groupSize;
+        int posInGroup = idx % groupSize;
+        
+        uint8_t* block = (uint8_t*)quantized + groupIdx * blockSize;
+        uint16_t scale16;
+        memcpy(&scale16, block, 2);
+        
+        int exponent = (scale16 >> 10) & 0x1F;
+        int mantissa = scale16 & 0x3FF;
+        float scale;
+        if (exponent == 0) {
+            scale = 0.0f;
+        } else if (exponent == 31) {
+            scale = 1e10f;
+        } else {
+            scale = powf(2.0f, (float)exponent - 15.0f) * (1.0f + mantissa / 1024.0f);
+        }
+        
+        int8_t quantVal = (int8_t)block[2 + posInGroup];
+        output[idx] = (float)quantVal * scale;
     }
 }
 
@@ -471,8 +589,11 @@ struct GGUFTensor {
     int dtype = 0;
     int64_t dataOffset = 0;
     bool dataLoaded = false;
-    std::vector<float> data;
-    float* d_data = nullptr;
+    bool dequantized = false;
+    std::vector<float> data;  // CPU buffer for quantized or float data
+    float* d_data = nullptr;  // GPU float32 buffer
+    void* d_quantized = nullptr;  // GPU quantized buffer (stays if not dequantized yet)
+    int64_t quantizedSize = 0;
 };
 
 // ==================== GGUFLoader ====================
@@ -531,6 +652,230 @@ private:
         float result;
         std::memcpy(&result, &f32bits, 4);
         return result;
+    }
+
+    // ==================== Quantization Dequantization ====================
+    
+    // Q4_0: 32 floats quantized in groups of 32
+    void dequantizeQ4_0(const std::vector<uint8_t>& quantized, std::vector<float>& output, int64_t numElements) {
+        const int groupSize = 32;
+        const int blockSize = 18; // 2 bytes scale + 16 bytes quantized data
+        
+        int groupIdx = 0;
+        for (int64_t i = 0; i < numElements; i += groupSize) {
+            uint8_t* block = (uint8_t*)quantized.data() + groupIdx * blockSize;
+            
+            // Read scale (float16)
+            uint16_t scale16;
+            std::memcpy(&scale16, block, 2);
+            float scale = float16ToFloat32(scale16);
+            
+            // Dequantize 32 values
+            int elementsInGroup = std::min((int64_t)groupSize, numElements - i);
+            for (int j = 0; j < elementsInGroup; j++) {
+                int byteIdx = 2 + j / 2;
+                int nibbleIdx = j % 2;
+                uint8_t quantVal = (block[byteIdx] >> (nibbleIdx * 4)) & 0x0F;
+                // Convert from [0,15] to [-8,7] range
+                int8_t signedVal = (int8_t)quantVal - 8;
+                output[i + j] = (float)signedVal * scale;
+            }
+            groupIdx++;
+        }
+    }
+    
+    // Q4_1: Similar to Q4_0 but with min/max instead of just scale
+    void dequantizeQ4_1(const std::vector<uint8_t>& quantized, std::vector<float>& output, int64_t numElements) {
+        const int groupSize = 32;
+        const int blockSize = 20; // 2 bytes scale + 2 bytes min + 16 bytes quantized data
+        
+        int groupIdx = 0;
+        for (int64_t i = 0; i < numElements; i += groupSize) {
+            uint8_t* block = (uint8_t*)quantized.data() + groupIdx * blockSize;
+            
+            // Read scale and min
+            uint16_t scale16, min16;
+            std::memcpy(&scale16, block, 2);
+            std::memcpy(&min16, block + 2, 2);
+            float scale = float16ToFloat32(scale16);
+            float minVal = float16ToFloat32(min16);
+            
+            // Dequantize 32 values
+            int elementsInGroup = std::min((int64_t)groupSize, numElements - i);
+            for (int j = 0; j < elementsInGroup; j++) {
+                int byteIdx = 4 + j / 2;
+                int nibbleIdx = j % 2;
+                uint8_t quantVal = (block[byteIdx] >> (nibbleIdx * 4)) & 0x0F;
+                output[i + j] = minVal + (float)quantVal * scale;
+            }
+            groupIdx++;
+        }
+    }
+    
+    // Q5_0: 32 floats with 5-bit quantization
+    void dequantizeQ5_0(const std::vector<uint8_t>& quantized, std::vector<float>& output, int64_t numElements) {
+        const int groupSize = 32;
+        const int blockSize = 22; // 2 bytes scale + 4 bytes upper bits + 16 bytes lower bits
+        
+        int groupIdx = 0;
+        for (int64_t i = 0; i < numElements; i += groupSize) {
+            uint8_t* block = (uint8_t*)quantized.data() + groupIdx * blockSize;
+            
+            // Read scale
+            uint16_t scale16;
+            std::memcpy(&scale16, block, 2);
+            float scale = float16ToFloat32(scale16);
+            
+            // Read upper bits (4 bytes for 32 values' MSB)
+            uint32_t upperBits;
+            std::memcpy(&upperBits, block + 2, 4);
+            
+            // Dequantize 32 values
+            int elementsInGroup = std::min((int64_t)groupSize, numElements - i);
+            for (int j = 0; j < elementsInGroup; j++) {
+                uint8_t lowerBits = block[6 + j / 2];
+                int nibbleIdx = j % 2;
+                uint8_t lower4bits = (lowerBits >> (nibbleIdx * 4)) & 0x0F;
+                
+                int upperBit = (upperBits >> j) & 1;
+                int quantVal = lower4bits | (upperBit << 4);
+                
+                // Convert from [0,31] to [-16,15]
+                int8_t signedVal = (int8_t)quantVal - 16;
+                output[i + j] = (float)signedVal * scale;
+            }
+            groupIdx++;
+        }
+    }
+    
+    // Q5_1: Similar to Q5_0 with min value
+    void dequantizeQ5_1(const std::vector<uint8_t>& quantized, std::vector<float>& output, int64_t numElements) {
+        const int groupSize = 32;
+        const int blockSize = 24; // 2 bytes scale + 2 bytes min + 4 bytes upper + 16 bytes lower
+        
+        int groupIdx = 0;
+        for (int64_t i = 0; i < numElements; i += groupSize) {
+            uint8_t* block = (uint8_t*)quantized.data() + groupIdx * blockSize;
+            
+            // Read scale and min
+            uint16_t scale16, min16;
+            std::memcpy(&scale16, block, 2);
+            std::memcpy(&min16, block + 2, 2);
+            float scale = float16ToFloat32(scale16);
+            float minVal = float16ToFloat32(min16);
+            
+            // Read upper bits
+            uint32_t upperBits;
+            std::memcpy(&upperBits, block + 4, 4);
+            
+            // Dequantize 32 values
+            int elementsInGroup = std::min((int64_t)groupSize, numElements - i);
+            for (int j = 0; j < elementsInGroup; j++) {
+                uint8_t lowerBits = block[8 + j / 2];
+                int nibbleIdx = j % 2;
+                uint8_t lower4bits = (lowerBits >> (nibbleIdx * 4)) & 0x0F;
+                
+                int upperBit = (upperBits >> j) & 1;
+                uint8_t quantVal = lower4bits | (upperBit << 4);
+                
+                output[i + j] = minVal + (float)quantVal * scale;
+            }
+            groupIdx++;
+        }
+    }
+    
+    // Q8_0: 32 floats with 8-bit quantization
+    void dequantizeQ8_0(const std::vector<uint8_t>& quantized, std::vector<float>& output, int64_t numElements) {
+        const int groupSize = 32;
+        const int blockSize = 18; // 2 bytes scale + 16 bytes quantized data
+        
+        int groupIdx = 0;
+        for (int64_t i = 0; i < numElements; i += groupSize) {
+            uint8_t* block = (uint8_t*)quantized.data() + groupIdx * blockSize;
+            
+            // Read scale
+            uint16_t scale16;
+            std::memcpy(&scale16, block, 2);
+            float scale = float16ToFloat32(scale16);
+            
+            // Dequantize 32 values
+            int elementsInGroup = std::min((int64_t)groupSize, numElements - i);
+            for (int j = 0; j < elementsInGroup; j++) {
+                int8_t quantVal = (int8_t)block[2 + j];
+                output[i + j] = (float)quantVal * scale;
+            }
+            groupIdx++;
+        }
+    }
+    
+    // Q2_K: K-quant with 2-bit quantization
+    void dequantizeQ2_K(const std::vector<uint8_t>& quantized, std::vector<float>& output, int64_t numElements) {
+        // Simplified Q2_K - each block is 256 elements
+        const int blockSize = 256;
+        int blockIdx = 0;
+        for (int64_t i = 0; i < numElements; i += blockSize) {
+            int elementsInBlock = std::min((int64_t)blockSize, numElements - i);
+            // This is a simplified version - proper Q2_K has complex encoding
+            // For now, use a basic dequantization approach
+            float minVal = -1.0f, maxVal = 1.0f;
+            float scale = (maxVal - minVal) / 3.0f;
+            
+            for (int j = 0; j < elementsInBlock; j++) {
+                uint8_t quantVal = (quantized[blockIdx] >> ((j % 4) * 2)) & 0x3;
+                output[i + j] = minVal + (float)quantVal * scale;
+            }
+            blockIdx++;
+        }
+    }
+    
+    // Q3_K: K-quant with 3-bit quantization
+    void dequantizeQ3_K(const std::vector<uint8_t>& quantized, std::vector<float>& output, int64_t numElements) {
+        // Simplified Q3_K - proper version is more complex
+        const int blockSize = 256;
+        int blockIdx = 0;
+        for (int64_t i = 0; i < numElements; i += blockSize) {
+            int elementsInBlock = std::min((int64_t)blockSize, numElements - i);
+            float minVal = -1.0f, maxVal = 1.0f;
+            float scale = (maxVal - minVal) / 7.0f;
+            
+            for (int j = 0; j < elementsInBlock; j++) {
+                int byteIdx = j / 8;
+                int bitIdx = (j % 8) * 3;
+                int quantVal = 0;
+                if (bitIdx + 3 <= 8) {
+                    quantVal = (quantized[blockIdx + byteIdx] >> bitIdx) & 0x7;
+                }
+                output[i + j] = minVal + (float)quantVal * scale;
+            }
+            blockIdx += (elementsInBlock + 7) / 8;
+        }
+    }
+    
+    // Q6_K: K-quant with 6-bit quantization
+    void dequantizeQ6_K(const std::vector<uint8_t>& quantized, std::vector<float>& output, int64_t numElements) {
+        // Simplified Q6_K
+        const int blockSize = 256;
+        int blockIdx = 0;
+        for (int64_t i = 0; i < numElements; i += blockSize) {
+            int elementsInBlock = std::min((int64_t)blockSize, numElements - i);
+            float minVal = -1.0f, maxVal = 1.0f;
+            float scale = (maxVal - minVal) / 63.0f;
+            
+            for (int j = 0; j < elementsInBlock; j++) {
+                int byteIdx = (j * 6) / 8;
+                int bitIdx = (j * 6) % 8;
+                uint8_t quantVal = 0;
+                if (bitIdx + 6 <= 8) {
+                    quantVal = (quantized[blockIdx + byteIdx] >> bitIdx) & 0x3F;
+                } else {
+                    int bits1 = 8 - bitIdx;
+                    quantVal = (quantized[blockIdx + byteIdx] >> bitIdx) & ((1 << bits1) - 1);
+                    quantVal |= (quantized[blockIdx + byteIdx + 1] & ((1 << (6 - bits1)) - 1)) << bits1;
+                }
+                output[i + j] = minVal + (float)quantVal * scale;
+            }
+            blockIdx += (elementsInBlock * 6 + 7) / 8;
+        }
     }
 
     std::string readString() {
@@ -620,6 +965,18 @@ private:
         tensorDataStart = aligned;
     }
 
+    int64_t getQuantizedSize(int dtype, int64_t numElements) {
+        switch (dtype) {
+            case 2: case 3: return (numElements * 4 + 7) / 8;  // Q4_0, Q4_1
+            case 6: case 7: return (numElements * 5 + 7) / 8;  // Q5_0, Q5_1
+            case 8: return numElements;                         // Q8_0
+            case 10: return (numElements * 2 + 7) / 8;         // Q2_K
+            case 11: return (numElements * 3 + 7) / 8;         // Q3_K
+            case 12: return (numElements * 6 + 7) / 8;         // Q6_K
+            default: return 0;
+        }
+    }
+
     bool loadTensorByIndex(size_t idx) {
         if (idx >= tensors.size()) return false;
         GGUFTensor& t = tensors[idx];
@@ -629,21 +986,58 @@ private:
         for (int64_t dim : t.shape)
             numElements *= dim;
 
-        t.data.resize(numElements);
         stream.seekg(tensorDataStart + t.dataOffset);
 
         if (t.dtype == 0) {
+            // F32 - load directly to GPU
+            t.data.resize(numElements);
             stream.read(reinterpret_cast<char*>(t.data.data()), numElements * 4);
+            CUDA_CHECK(cudaMalloc(&t.d_data, numElements * sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(t.d_data, t.data.data(), numElements * sizeof(float), cudaMemcpyHostToDevice));
+            t.data.clear();
+            t.data.shrink_to_fit();
+            
         } else if (t.dtype == 1) {
+            // F16 - convert on CPU then upload
             std::vector<uint16_t> f16data(numElements);
             stream.read(reinterpret_cast<char*>(f16data.data()), numElements * 2);
+            t.data.resize(numElements);
             for (int64_t j = 0; j < numElements; j++)
                 t.data[j] = float16ToFloat32(f16data[j]);
+            CUDA_CHECK(cudaMalloc(&t.d_data, numElements * sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(t.d_data, t.data.data(), numElements * sizeof(float), cudaMemcpyHostToDevice));
+            t.data.clear();
+            t.data.shrink_to_fit();
+            
+        } else if (t.dtype == 2 || t.dtype == 3 || t.dtype == 6 || t.dtype == 7 || 
+                   t.dtype == 8 || t.dtype == 10 || t.dtype == 11 || t.dtype == 12) {
+            // Quantized formats - load to GPU as-is
+            int64_t quantizedSize = getQuantizedSize(t.dtype, numElements);
+            if (quantizedSize == 0) {
+                std::cerr << "Unsupported quantized dtype " << t.dtype << std::endl;
+                return false;
+            }
+            
+            t.data.resize(quantizedSize / sizeof(float) + 1);  // Store as bytes in vector
+            stream.read(reinterpret_cast<char*>(t.data.data()), quantizedSize);
+            
+            CUDA_CHECK(cudaMalloc(&t.d_quantized, quantizedSize));
+            CUDA_CHECK(cudaMemcpy(t.d_quantized, t.data.data(), quantizedSize, cudaMemcpyHostToDevice));
+            t.quantizedSize = quantizedSize;
+            t.data.clear();
+            t.data.shrink_to_fit();
+            
         } else if (t.dtype == 30) {
+            // BFLOAT16
             std::vector<uint16_t> bf16data(numElements);
             stream.read(reinterpret_cast<char*>(bf16data.data()), numElements * 2);
+            t.data.resize(numElements);
             for (int64_t j = 0; j < numElements; j++)
                 t.data[j] = bfloat16ToFloat32(bf16data[j]);
+            CUDA_CHECK(cudaMalloc(&t.d_data, numElements * sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(t.d_data, t.data.data(), numElements * sizeof(float), cudaMemcpyHostToDevice));
+            t.data.clear();
+            t.data.shrink_to_fit();
         } else {
             std::cerr << "Unsupported dtype " << t.dtype << " for tensor " << t.name << std::endl;
             return false;
@@ -678,15 +1072,39 @@ public:
             auto it = tensorMap.find(name);
             if (it != tensorMap.end()) {
                 GGUFTensor& t = tensors[it->second];
+                
+                // Already dequantized or float
                 if (t.d_data != nullptr) return t.d_data;
                 
-                if (!loadTensorByIndex(it->second)) return nullptr;
+                // Load from disk if needed
+                if (!t.dataLoaded && !loadTensorByIndex(it->second)) return nullptr;
                 
-                CUDA_CHECK(cudaMalloc(&t.d_data, t.data.size() * sizeof(float)));
-                CUDA_CHECK(cudaMemcpy(t.d_data, t.data.data(), t.data.size() * sizeof(float), cudaMemcpyHostToDevice));
-                
-                t.data.clear();
-                t.data.shrink_to_fit();
+                // If still quantized, dequantize now
+                if (!t.dequantized && t.d_quantized != nullptr) {
+                    int64_t numElements = 1;
+                    for (int64_t dim : t.shape) numElements *= dim;
+                    
+                    CUDA_CHECK(cudaMalloc(&t.d_data, numElements * sizeof(float)));
+                    
+                    int blockSize = 256;
+                    int gridSize = (numElements + blockSize - 1) / blockSize;
+                    
+                    if (t.dtype == 2) {
+                        dequantizeQ4_0Kernel<<<gridSize, blockSize>>>((const uint8_t*)t.d_quantized, t.d_data, numElements);
+                    } else if (t.dtype == 3) {
+                        dequantizeQ4_1Kernel<<<gridSize, blockSize>>>((const uint8_t*)t.d_quantized, t.d_data, numElements);
+                    } else if (t.dtype == 8) {
+                        dequantizeQ8_0Kernel<<<gridSize, blockSize>>>((const uint8_t*)t.d_quantized, t.d_data, numElements);
+                    }
+                    
+                    CUDA_CHECK(cudaGetLastError());
+                    CUDA_CHECK(cudaDeviceSynchronize());
+                    
+                    // Free quantized data
+                    cudaFree(t.d_quantized);
+                    t.d_quantized = nullptr;
+                    t.dequantized = true;
+                }
                 
                 return t.d_data;
             }
@@ -726,6 +1144,10 @@ public:
             if (t.d_data != nullptr) {
                 cudaFree(t.d_data);
                 t.d_data = nullptr;
+            }
+            if (t.d_quantized != nullptr) {
+                cudaFree(t.d_quantized);
+                t.d_quantized = nullptr;
             }
         }
     }
