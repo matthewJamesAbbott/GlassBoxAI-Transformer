@@ -2021,7 +2021,17 @@ public:
 
     bool isModelLoaded() const { return loader.isLoaded(); }
     bool isTokenizerLoaded() const { return tokenizer.isLoaded(); }
+    bool isLoaded() const { return loader.isLoaded(); }
     void printTensorNames() { loader.printAllTensorNames(); }
+    void printQuantizationStats() { loader.printQuantizationStats(); }
+    
+    // Getters for model properties
+    int getEmbedDim() const { return embedDim; }
+    int getNumLayers() const { return numLayers; }
+    int getNumHeads() const { return numHeads; }
+    int getFFNDim() const { return ffnDim; }
+    int getVocabSize() const { return vocabSize; }
+    int getMaxSeqLen() const { return MAX_SEQ_LEN; }
 };
 
 // ==================== Argument Parser ====================
@@ -2050,39 +2060,63 @@ struct Arguments {
     bool verbose = false;
     bool help = false;
     bool fp32Only = false;
+    bool interactiveMode = false;
+    bool scriptMode = false;
+    bool stdinMode = false;
+    std::string logFile = "agent_history.log";
+    bool enableLogging = true;
 };
 
 void printUsage(const char* progName) {
     std::cout << "========================================" << std::endl;
-    std::cout << "  GGUF Transformer CLI - CUDA/Dequant" << std::endl;
+    std::cout << "  TRANSFORMER AGENT - CUDA/GGML/LLaMA2" << std::endl;
+    std::cout << "  Full Dequantization + Agentic Interface" << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << std::endl;
-    std::cout << "Usage: " << progName << " <model.gguf> <tokenizer.json> [options]" << std::endl;
+    std::cout << "USAGE MODES:" << std::endl;
     std::cout << std::endl;
-    std::cout << "REQUIRED ARGUMENTS:" << std::endl;
+    std::cout << "1. Interactive Mode (no arguments):" << std::endl;
+    std::cout << "   " << progName << std::endl;
+    std::cout << std::endl;
+    std::cout << "2. Script/Batch Mode (read commands from file or stdin):" << std::endl;
+    std::cout << "   " << progName << " model.gguf tokenizer.json --script commands.txt" << std::endl;
+    std::cout << "   " << progName << " model.gguf tokenizer.json --stdin" << std::endl;
+    std::cout << std::endl;
+    std::cout << "3. Single Generation Mode (model + prompt):" << std::endl;
+    std::cout << "   " << progName << " <model.gguf> <tokenizer.json> -p \"<prompt>\" [options]" << std::endl;
+    std::cout << std::endl;
+    std::cout << "REQUIRED ARGUMENTS (for generation modes):" << std::endl;
     std::cout << "  <model.gguf>           Path to the GGUF model file" << std::endl;
     std::cout << "  <tokenizer.json>       Path to the tokenizer JSON file" << std::endl;
     std::cout << std::endl;
     std::cout << "GENERATION OPTIONS:" << std::endl;
-    std::cout << "  -p, --prompt TEXT          Input prompt (default: \"Hello\")" << std::endl;
-    std::cout << "  --input-file FILE          Read prompt from file instead of command line" << std::endl;
+    std::cout << "  -p, --prompt TEXT          Input prompt for generation" << std::endl;
     std::cout << "  -n, --max-tokens N         Maximum tokens to generate (default: 5)" << std::endl;
     std::cout << "  -t, --temperature T        Sampling temperature 0.0-2.0 (default: 1.0)" << std::endl;
-    std::cout << "  --top-k K                  Top-K sampling (disable with -1) (default: -1)" << std::endl;
+    std::cout << "  --top-k K                  Top-K sampling (disable with -1)" << std::endl;
     std::cout << "  --top-p P                  Nucleus/Top-P sampling 0.0-1.0 (default: 1.0)" << std::endl;
     std::cout << "  --repetition-penalty P     Penalize repeated tokens (default: 1.0)" << std::endl;
     std::cout << "  --context-length N         Max context window size (default: 1024)" << std::endl;
-    std::cout << "  --seed S                   Random seed for reproducibility (default: random)" << std::endl;
+    std::cout << "  --seed S                   Random seed for reproducibility" << std::endl;
+    std::cout << std::endl;
+    std::cout << "SCRIPTING & BATCH MODE:" << std::endl;
+    std::cout << "  --script FILE              Load and execute commands from script file" << std::endl;
+    std::cout << "  --stdin                    Read commands from stdin (for piping)" << std::endl;
+    std::cout << "  --log FILE                 Write session log to file (default: agent_history.log)" << std::endl;
+    std::cout << "  --no-log                   Disable session logging" << std::endl;
     std::cout << std::endl;
     std::cout << "OUTPUT OPTIONS:" << std::endl;
     std::cout << "  -o, --output FILE          Save generated text to file" << std::endl;
     std::cout << "  --json-output              Format output as JSON" << std::endl;
     std::cout << std::endl;
-    std::cout << "MODEL & QUANTIZATION:" << std::endl;
+    std::cout << "INSPECTION & DIAGNOSTICS:" << std::endl;
     std::cout << "  --list-tensors             List all tensors in model and exit" << std::endl;
     std::cout << "  --show-quant-stats         Display quantization statistics (default: yes)" << std::endl;
     std::cout << "  --no-quant-stats           Skip quantization statistics output" << std::endl;
-    std::cout << "  --fp32-only                Only load F32 tensors, skip quantized (useful for testing)" << std::endl;
+    std::cout << std::endl;
+    std::cout << "MODEL & QUANTIZATION:" << std::endl;
+    std::cout << "  --fp32-only                Only load F32 tensors, skip quantized" << std::endl;
+    std::cout << "  --test-dequant             Test dequantization on all quantized tensors" << std::endl;
     std::cout << std::endl;
     std::cout << "DEVICE & PERFORMANCE:" << std::endl;
     std::cout << "  --device ID                Select GPU device ID (default: 0)" << std::endl;
@@ -2090,29 +2124,42 @@ void printUsage(const char* progName) {
     std::cout << "  --memory-limit MB          Limit GPU memory usage in MB (0=unlimited)" << std::endl;
     std::cout << "  --benchmark                Run benchmark tests after generation" << std::endl;
     std::cout << std::endl;
-    std::cout << "DEBUGGING & TESTING:" << std::endl;
-    std::cout << "  --test-dequant             Test dequantization on all quantized tensors" << std::endl;
+    std::cout << "DEBUGGING:" << std::endl;
     std::cout << "  -v, --verbose              Enable verbose logging" << std::endl;
     std::cout << "  -h, --help                 Show this help message" << std::endl;
     std::cout << std::endl;
+    std::cout << "INTERACTIVE AGENT COMMANDS:" << std::endl;
+    std::cout << "  load <model.gguf> <tok.json>  Load model and tokenizer" << std::endl;
+    std::cout << "  run <prompt> [tokens] [temp]  Run inference/generation" << std::endl;
+    std::cout << "  info                          Display model architecture" << std::endl;
+    std::cout << "  inspect [type]                Inspect model (summary/performance/layers)" << std::endl;
+    std::cout << "  list-tensors                  List all model tensors" << std::endl;
+    std::cout << "  quant-stats                   Show quantization statistics" << std::endl;
+    std::cout << "  save <filename>               Save last output to file" << std::endl;
+    std::cout << "  history                       Show action history" << std::endl;
+    std::cout << "  help                          Show agent commands" << std::endl;
+    std::cout << "  quit/exit                     Exit agent" << std::endl;
+    std::cout << std::endl;
     std::cout << "EXAMPLES:" << std::endl;
-    std::cout << "  # Basic generation with custom prompt" << std::endl;
-    std::cout << "  " << progName << " model.gguf tokenizer.json -p \"Hello world\" -n 20 -t 0.8" << std::endl;
     std::cout << std::endl;
-    std::cout << "  # List all tensors to inspect quantization" << std::endl;
+    std::cout << "  # Interactive mode" << std::endl;
+    std::cout << "  " << progName << std::endl;
+    std::cout << "  > load model.gguf tokenizer.json" << std::endl;
+    std::cout << "  > run \"Hello world\" 50 0.8" << std::endl;
+    std::cout << "  > save output.txt" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # Single generation" << std::endl;
+    std::cout << "  " << progName << " model.gguf tokenizer.json -p \"Once upon a time\" -n 50 -t 0.9" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # Batch mode from script" << std::endl;
+    std::cout << "  " << progName << " model.gguf tokenizer.json --script commands.txt --log batch.log" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # Piped batch mode" << std::endl;
+    std::cout << "  echo \"load model.gguf tok.json\" | " << progName << " --stdin" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  # Inspection" << std::endl;
     std::cout << "  " << progName << " model.gguf tokenizer.json --list-tensors" << std::endl;
-    std::cout << std::endl;
-    std::cout << "  # Top-P sampling with custom seed" << std::endl;
-    std::cout << "  " << progName << " model.gguf tokenizer.json -p \"Once upon a time\" --top-p 0.9 --seed 42 -n 50" << std::endl;
-    std::cout << std::endl;
-    std::cout << "  # Read prompt from file, save output, show stats" << std::endl;
-    std::cout << "  " << progName << " model.gguf tokenizer.json --input-file prompt.txt -o output.txt --show-quant-stats" << std::endl;
-    std::cout << std::endl;
-    std::cout << "  # JSON output with benchmark" << std::endl;
-    std::cout << "  " << progName << " model.gguf tokenizer.json --json-output --benchmark -n 10" << std::endl;
-    std::cout << std::endl;
-    std::cout << "  # Test dequantization and verbose output" << std::endl;
-    std::cout << "  " << progName << " model.gguf tokenizer.json --test-dequant --verbose" << std::endl;
+    std::cout << "  " << progName << " model.gguf tokenizer.json --show-quant-stats" << std::endl;
     std::cout << std::endl;
 }
 
@@ -2147,6 +2194,16 @@ Arguments parseArguments(int argc, char* argv[]) {
             args.jsonOutput = true;
         } else if (arg == "--fp32-only") {
             args.fp32Only = true;
+        } else if (arg == "--stdin") {
+            args.stdinMode = true;
+        } else if ((arg == "--script") && i + 1 < argc) {
+            args.scriptMode = true;
+            args.inputFile = argv[++i];
+        } else if ((arg == "--log") && i + 1 < argc) {
+            args.logFile = argv[++i];
+            args.enableLogging = true;
+        } else if (arg == "--no-log") {
+            args.enableLogging = false;
         } else if ((arg == "-p" || arg == "--prompt") && i + 1 < argc) {
             args.prompt = argv[++i];
         } else if ((arg == "--input-file") && i + 1 < argc) {
@@ -2193,10 +2250,631 @@ Arguments parseArguments(int argc, char* argv[]) {
 
 // ==================== Main ====================
 
+// ==================== Agent & Session Management ====================
+
+struct ActionResult {
+    bool success = true;
+    std::string message;
+    std::string output;
+    std::chrono::high_resolution_clock::time_point timestamp;
+    std::string actionType;
+};
+
+struct SessionHistory {
+    std::vector<ActionResult> actions;
+    std::map<std::string, std::string> sessionVars;
+    std::string currentModel;
+    std::string currentQuantization;
+    int totalTokensProcessed = 0;
+    std::ofstream* logFile = nullptr;
+    bool loggingEnabled = false;
+    
+    void startLogging(const std::string& logPath) {
+        if (logFile) logFile->close();
+        logFile = new std::ofstream(logPath, std::ios::app);
+        loggingEnabled = logFile->is_open();
+    }
+    
+    void logAction(const ActionResult& result) {
+        if (!loggingEnabled || !logFile) return;
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        *logFile << "[" << std::ctime(&time_t) << "] " << result.actionType 
+                 << ": " << result.message << std::endl;
+        logFile->flush();
+    }
+    
+    ~SessionHistory() {
+        if (logFile) {
+            logFile->close();
+            delete logFile;
+        }
+    }
+};
+
+class TransformerAgent {
+private:
+    TransformerModel model;
+    SessionHistory history;
+    std::vector<std::string> commandQueue;
+    bool interactiveMode = false;
+    std::string historyFile = "agent_history.log";
+    
+public:
+    TransformerAgent() {
+        history.startLogging(historyFile);
+    }
+    
+    ~TransformerAgent() = default;
+    
+    // Action: Load Model
+    ActionResult actionLoadModel(const std::string& modelPath, const std::string& tokenizerPath) {
+        ActionResult result;
+        result.actionType = "LOAD_MODEL";
+        result.timestamp = std::chrono::high_resolution_clock::now();
+        
+        std::cout << "\n[AGENT] Loading model: " << modelPath << std::endl;
+        
+        if (!model.loadModel(modelPath, true)) {
+            result.success = false;
+            result.message = "Failed to load model: " + modelPath;
+            std::cout << "ERROR: " << result.message << std::endl;
+        } else {
+            std::cout << "[AGENT] Model loaded successfully" << std::endl;
+            std::cout << "[AGENT] Architecture: ";
+            std::cout << "Embed=" << model.getEmbedDim() << " ";
+            std::cout << "Layers=" << model.getNumLayers() << " ";
+            std::cout << "Heads=" << model.getNumHeads() << std::endl;
+            result.message = "Model loaded: " + modelPath;
+            history.currentModel = modelPath;
+        }
+        
+        if (!tokenizerPath.empty()) {
+            std::cout << "[AGENT] Loading tokenizer: " << tokenizerPath << std::endl;
+            if (!model.loadTokenizer(tokenizerPath)) {
+                result.success = false;
+                result.message = "Failed to load tokenizer";
+                std::cout << "ERROR: " << result.message << std::endl;
+            } else {
+                std::cout << "[AGENT] Tokenizer loaded successfully" << std::endl;
+            }
+        }
+        
+        history.logAction(result);
+        history.actions.push_back(result);
+        return result;
+    }
+    
+    // Action: Run Inference
+    ActionResult actionRunInference(const std::string& prompt, int maxTokens = 50, float temperature = 0.8f) {
+        ActionResult result;
+        result.actionType = "RUN_INFERENCE";
+        result.timestamp = std::chrono::high_resolution_clock::now();
+        
+        if (!model.isLoaded()) {
+            result.success = false;
+            result.message = "Model not loaded. Use 'load' action first.";
+            std::cout << "ERROR: " << result.message << std::endl;
+            return result;
+        }
+        
+        std::cout << "\n[AGENT] Running inference..." << std::endl;
+        std::cout << "[AGENT] Prompt: \"" << (prompt.length() > 80 ? prompt.substr(0, 80) + "..." : prompt) << "\"" << std::endl;
+        std::cout << "[AGENT] Tokens: " << maxTokens << ", Temp: " << temperature << std::endl;
+        
+        auto t0 = std::chrono::high_resolution_clock::now();
+        result.output = model.generate(prompt, maxTokens, temperature);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        
+        double elapsed = std::chrono::duration<double>(t1 - t0).count();
+        result.message = "Inference completed in " + std::to_string(elapsed) + "s";
+        result.success = !result.output.empty();
+        
+        std::cout << "[AGENT] Output: " << result.output << std::endl;
+        std::cout << "[AGENT] Time: " << elapsed << "s" << std::endl;
+        
+        history.totalTokensProcessed += maxTokens;
+        history.logAction(result);
+        history.actions.push_back(result);
+        return result;
+    }
+    
+    // Action: Show Model Info
+    ActionResult actionShowModelInfo() {
+        ActionResult result;
+        result.actionType = "SHOW_MODEL_INFO";
+        result.timestamp = std::chrono::high_resolution_clock::now();
+        
+        if (!model.isLoaded()) {
+            result.success = false;
+            result.message = "Model not loaded. Use 'load <model.gguf> <tokenizer.json>' first.";
+            std::cerr << "ERROR: " << result.message << std::endl;
+            return result;
+        }
+        
+        std::cout << "\n=== MODEL ARCHITECTURE ===" << std::endl;
+        std::cout << "Embedding Dim: " << model.getEmbedDim() << std::endl;
+        std::cout << "Num Layers: " << model.getNumLayers() << std::endl;
+        std::cout << "Num Heads: " << model.getNumHeads() << std::endl;
+        std::cout << "Head Dimension: " << (model.getEmbedDim() / model.getNumHeads()) << std::endl;
+        std::cout << "FFN Dim: " << model.getFFNDim() << std::endl;
+        std::cout << "Vocab Size: " << model.getVocabSize() << std::endl;
+        std::cout << "Max Seq Len: " << model.getMaxSeqLen() << std::endl;
+        std::cout << "Tokenizer Loaded: " << (model.isTokenizerLoaded() ? "Yes" : "No") << std::endl;
+        
+        result.message = "Model info displayed";
+        result.success = true;
+        history.logAction(result);
+        history.actions.push_back(result);
+        return result;
+    }
+    
+    // Action: Inspect Model (diagnostics)
+    ActionResult actionInspectModel(const std::string& inspectType = "") {
+        ActionResult result;
+        result.actionType = "INSPECT_MODEL";
+        result.timestamp = std::chrono::high_resolution_clock::now();
+        
+        if (!model.isLoaded()) {
+            result.success = false;
+            result.message = "Model not loaded. Use 'load' first.";
+            std::cerr << "ERROR: " << result.message << std::endl;
+            return result;
+        }
+        
+        std::cout << "\n=== MODEL INSPECTION ===" << std::endl;
+        
+        if (inspectType.empty() || inspectType == "summary") {
+            std::cout << "Model Architecture Summary:" << std::endl;
+            std::cout << "  Parameters: " << (model.getEmbedDim() * model.getVocabSize() + 
+                                             model.getNumLayers() * model.getEmbedDim() * model.getFFNDim()) / 1e6
+                      << " M" << std::endl;
+            std::cout << "  Attention: Standard Multi-Head" << std::endl;
+            std::cout << "  Total Tensors: (run 'list-tensors' to see all)" << std::endl;
+        } 
+        else if (inspectType == "performance") {
+            std::cout << "Performance Characteristics:" << std::endl;
+            std::cout << "  GPU Memory per token (approx): " << (model.getEmbedDim() * 4 / 1024.0) << " KB" << std::endl;
+            std::cout << "  Max batch size (estimated): " << (1024 * 1024 / (model.getEmbedDim() * 4 + 100)) << std::endl;
+        }
+        else if (inspectType == "layers") {
+            std::cout << "Layer Configuration:" << std::endl;
+            std::cout << "  Hidden size: " << model.getEmbedDim() << std::endl;
+            std::cout << "  Number of layers: " << model.getNumLayers() << std::endl;
+            std::cout << "  Attention heads: " << model.getNumHeads() << std::endl;
+            std::cout << "  Head dimension: " << (model.getEmbedDim() / model.getNumHeads()) << std::endl;
+            std::cout << "  FFN hidden size: " << model.getFFNDim() << std::endl;
+        }
+        
+        result.message = "Model inspection completed";
+        result.success = true;
+        history.logAction(result);
+        history.actions.push_back(result);
+        return result;
+    }
+    
+    // Action: List Tensors
+    ActionResult actionListTensors(int limit = 0) {
+        ActionResult result;
+        result.actionType = "LIST_TENSORS";
+        result.timestamp = std::chrono::high_resolution_clock::now();
+        
+        if (!model.isLoaded()) {
+            result.success = false;
+            result.message = "Model not loaded";
+            return result;
+        }
+        
+        std::cout << "\n=== LOADED TENSORS ===" << std::endl;
+        model.printTensorNames();
+        
+        result.message = "Tensors listed";
+        result.success = true;
+        history.logAction(result);
+        history.actions.push_back(result);
+        return result;
+    }
+    
+    // Action: Show Quantization Stats
+    ActionResult actionShowQuantStats() {
+        ActionResult result;
+        result.actionType = "SHOW_QUANT_STATS";
+        result.timestamp = std::chrono::high_resolution_clock::now();
+        
+        if (!model.isLoaded()) {
+            result.success = false;
+            result.message = "Model not loaded";
+            return result;
+        }
+        
+        model.printQuantizationStats();
+        
+        result.message = "Quantization stats displayed";
+        result.success = true;
+        history.logAction(result);
+        history.actions.push_back(result);
+        return result;
+    }
+    
+    // Action: Save Output
+    ActionResult actionSaveOutput(const std::string& filePath, const std::string& content) {
+        ActionResult result;
+        result.actionType = "SAVE_OUTPUT";
+        result.timestamp = std::chrono::high_resolution_clock::now();
+        
+        std::ofstream outfile(filePath);
+        if (!outfile.is_open()) {
+            result.success = false;
+            result.message = "Failed to open file: " + filePath;
+            return result;
+        }
+        
+        outfile << content;
+        outfile.close();
+        
+        result.message = "Output saved to: " + filePath;
+        result.success = true;
+        std::cout << "[AGENT] " << result.message << std::endl;
+        history.logAction(result);
+        history.actions.push_back(result);
+        return result;
+    }
+    
+    // Action: Show Session History
+    ActionResult actionShowHistory() {
+        ActionResult result;
+        result.actionType = "SHOW_HISTORY";
+        result.timestamp = std::chrono::high_resolution_clock::now();
+        
+        std::cout << "\n=== SESSION HISTORY ===" << std::endl;
+        std::cout << "Total actions: " << history.actions.size() << std::endl;
+        std::cout << "Total tokens processed: " << history.totalTokensProcessed << std::endl;
+        
+        std::cout << "\nAction Log:" << std::endl;
+        for (size_t i = 0; i < history.actions.size(); i++) {
+            const auto& action = history.actions[i];
+            auto time_t = std::chrono::system_clock::to_time_t(action.timestamp);
+            std::cout << "[" << (i+1) << "] " << action.actionType << ": " << action.message << std::endl;
+        }
+        
+        result.message = "History displayed";
+        result.success = true;
+        return result;
+    }
+    
+    // Parse natural language & structured commands
+    std::vector<std::string> parseCommand(const std::string& input) {
+        std::vector<std::string> tokens;
+        std::istringstream iss(input);
+        std::string token;
+        bool inQuotes = false;
+        std::string currentToken;
+        
+        // Handle quoted strings properly
+        for (char c : input) {
+            if (c == '"') {
+                inQuotes = !inQuotes;
+                if (!inQuotes && !currentToken.empty()) {
+                    tokens.push_back(currentToken);
+                    currentToken.clear();
+                }
+            } else if ((c == ' ' || c == '\t') && !inQuotes) {
+                if (!currentToken.empty()) {
+                    tokens.push_back(currentToken);
+                    currentToken.clear();
+                }
+            } else if (!inQuotes || c != '"') {
+                currentToken += c;
+            }
+        }
+        
+        if (!currentToken.empty()) {
+            tokens.push_back(currentToken);
+        }
+        
+        return tokens;
+    }
+    
+    // Natural language command mapper
+    std::string recognizeNaturalLanguage(const std::string& input) {
+        std::string lower = input;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        
+        // Load model patterns
+        if (lower.find("load") != std::string::npos || 
+            lower.find("open") != std::string::npos ||
+            lower.find("read") != std::string::npos) {
+            return "load";
+        }
+        
+        // Generate/inference patterns
+        if (lower.find("generate") != std::string::npos ||
+            lower.find("infer") != std::string::npos ||
+            lower.find("run") != std::string::npos ||
+            lower.find("compute") != std::string::npos ||
+            lower.find("predict") != std::string::npos) {
+            return "run";
+        }
+        
+        // Show info patterns
+        if (lower.find("info") != std::string::npos ||
+            lower.find("show") != std::string::npos ||
+            lower.find("display") != std::string::npos ||
+            lower.find("architecture") != std::string::npos) {
+            return "info";
+        }
+        
+        // Inspect patterns
+        if (lower.find("inspect") != std::string::npos ||
+            lower.find("weights") != std::string::npos ||
+            lower.find("attention") != std::string::npos ||
+            lower.find("tensors") != std::string::npos) {
+            return "inspect";
+        }
+        
+        // Quantization patterns
+        if (lower.find("quant") != std::string::npos ||
+            lower.find("compress") != std::string::npos ||
+            lower.find("statistics") != std::string::npos) {
+            return "quant-stats";
+        }
+        
+        // Save patterns
+        if (lower.find("save") != std::string::npos ||
+            lower.find("write") != std::string::npos ||
+            lower.find("output") != std::string::npos) {
+            return "save";
+        }
+        
+        return "";
+    }
+    
+    // Execute command based on parsed tokens
+    ActionResult executeCommand(const std::vector<std::string>& tokens) {
+        if (tokens.empty()) {
+            ActionResult result;
+            result.success = false;
+            result.message = "Empty command";
+            return result;
+        }
+        
+        std::string cmd = tokens[0];
+        std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::tolower);
+        
+        // Try natural language recognition if not a standard command
+        if (!cmd.empty() && cmd[0] != '-') {
+            std::string nlCmd = recognizeNaturalLanguage(cmd);
+            if (!nlCmd.empty() && nlCmd != cmd) {
+                // Remap to recognized command
+                cmd = nlCmd;
+            }
+        }
+        
+        if (cmd == "load" || cmd == "load-model") {
+            if (tokens.size() < 3) {
+                ActionResult result;
+                result.success = false;
+                result.message = "Usage: load <model.gguf> <tokenizer.json>\nExample: load model.gguf tokenizer.json";
+                std::cerr << "ERROR: " << result.message << std::endl;
+                return result;
+            }
+            return actionLoadModel(tokens[1], tokens[2]);
+        }
+        else if (cmd == "run" || cmd == "infer" || cmd == "generate") {
+            if (tokens.size() < 2) {
+                ActionResult result;
+                result.success = false;
+                result.message = "Usage: run \"<prompt>\" [max_tokens] [temperature]\nExample: run \"Hello world\" 50 0.8";
+                std::cerr << "ERROR: " << result.message << std::endl;
+                return result;
+            }
+            
+            // Reconstruct prompt from remaining tokens
+            std::string prompt;
+            for (size_t i = 1; i < tokens.size(); i++) {
+                if (i > 1) prompt += " ";
+                prompt += tokens[i];
+            }
+            
+            int maxTokens = 50;
+            float temperature = 0.8f;
+            
+            try {
+                if (tokens.size() > 2) maxTokens = std::stoi(tokens[2]);
+                if (tokens.size() > 3) temperature = std::stof(tokens[3]);
+            } catch (const std::exception& e) {
+                ActionResult result;
+                result.success = false;
+                result.message = "Invalid numeric argument: " + std::string(e.what());
+                std::cerr << "ERROR: " << result.message << std::endl;
+                return result;
+            }
+            
+            return actionRunInference(prompt, maxTokens, temperature);
+        }
+        else if (cmd == "info" || cmd == "model-info" || cmd == "show") {
+            return actionShowModelInfo();
+        }
+        else if (cmd == "inspect" || cmd == "diagnostics" || cmd == "diag") {
+            std::string inspectType = (tokens.size() > 1) ? tokens[1] : "";
+            return actionInspectModel(inspectType);
+        }
+        else if (cmd == "list-tensors" || cmd == "tensors" || cmd == "list") {
+            return actionListTensors();
+        }
+        else if (cmd == "quant-stats" || cmd == "stats" || cmd == "statistics") {
+            return actionShowQuantStats();
+        }
+        else if (cmd == "save" || cmd == "write") {
+            if (tokens.size() < 2) {
+                ActionResult result;
+                result.success = false;
+                result.message = "Usage: save <filename>\nWill save last inference output.";
+                std::cerr << "ERROR: " << result.message << std::endl;
+                return result;
+            }
+            // Find last inference output
+            for (auto it = history.actions.rbegin(); it != history.actions.rend(); ++it) {
+                if (it->actionType == "RUN_INFERENCE" && !it->output.empty()) {
+                    return actionSaveOutput(tokens[1], it->output);
+                }
+            }
+            ActionResult result;
+            result.success = false;
+            result.message = "No inference output to save. Run inference first with 'run <prompt>'";
+            std::cerr << "ERROR: " << result.message << std::endl;
+            return result;
+        }
+        else if (cmd == "history" || cmd == "log") {
+            return actionShowHistory();
+        }
+        else if (cmd == "help" || cmd == "?" || cmd == "commands") {
+            std::cout << "\n=== AGENT COMMANDS ===" << std::endl;
+            std::cout << "\nBasic Operations:" << std::endl;
+            std::cout << "  load <model.gguf> <tokenizer.json>  Load model and tokenizer" << std::endl;
+            std::cout << "  run <prompt> [tokens] [temp]        Run inference (generate text)" << std::endl;
+            std::cout << "  info                                Display model architecture" << std::endl;
+            std::cout << "\nInspection & Diagnostics:" << std::endl;
+            std::cout << "  inspect [type]                      Inspect model (summary/performance/layers)" << std::endl;
+            std::cout << "  list-tensors                        List all model tensors" << std::endl;
+            std::cout << "  quant-stats                         Show quantization statistics" << std::endl;
+            std::cout << "\nOutput & History:" << std::endl;
+            std::cout << "  save <filename>                     Save last output to file" << std::endl;
+            std::cout << "  history                             Show action history" << std::endl;
+            std::cout << "\nControl:" << std::endl;
+            std::cout << "  help                                Show this help message" << std::endl;
+            std::cout << "  quit/exit                           Exit agent" << std::endl;
+            ActionResult result;
+            result.success = true;
+            result.message = "Help displayed";
+            return result;
+        }
+        else {
+            ActionResult result;
+            result.success = false;
+            result.message = "Unknown command: '" + cmd + "'\n"
+                           + "Did you mean one of: load, run, info, inspect, list-tensors, quant-stats, save, history, help?\n"
+                           + "Type 'help' for available commands.";
+            std::cerr << "ERROR: " << result.message << std::endl;
+            return result;
+        }
+    }
+    
+    // Execute pipeline of commands
+    void executePipeline(const std::vector<std::string>& commandList) {
+        std::cout << "\n=== EXECUTING PIPELINE ===" << std::endl;
+        std::cout << "Total commands: " << commandList.size() << std::endl << std::endl;
+        
+        for (size_t i = 0; i < commandList.size(); i++) {
+            std::cout << "\n--- Command [" << (i+1) << "/" << commandList.size() << "] ---" << std::endl;
+            std::cout << "> " << commandList[i] << std::endl;
+            
+            auto tokens = parseCommand(commandList[i]);
+            auto result = executeCommand(tokens);
+            
+            if (!result.success) {
+                std::cout << "WARNING: Command failed. Continuing..." << std::endl;
+            }
+        }
+        
+        std::cout << "\n=== PIPELINE COMPLETE ===" << std::endl;
+    }
+    
+    // Load script from file
+    bool loadScript(const std::string& scriptPath) {
+        std::ifstream file(scriptPath);
+        if (!file.is_open()) {
+            std::cerr << "ERROR: Cannot open script file: " << scriptPath << std::endl;
+            return false;
+        }
+        
+        std::string line;
+        int lineNum = 0;
+        while (std::getline(file, line)) {
+            lineNum++;
+            // Skip empty lines and comments
+            if (line.empty() || line[0] == '#') continue;
+            
+            // Trim whitespace
+            size_t start = line.find_first_not_of(" \t");
+            if (start == std::string::npos) continue;
+            
+            commandQueue.push_back(line.substr(start));
+        }
+        
+        file.close();
+        std::cout << "[AGENT] Loaded " << commandQueue.size() << " commands from script" << std::endl;
+        return true;
+    }
+    
+    // Load commands from stdin (for piping)
+    bool loadStdin() {
+        std::cout << "[AGENT] Reading commands from stdin (Ctrl-D to exit)..." << std::endl;
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            
+            size_t start = line.find_first_not_of(" \t");
+            if (start == std::string::npos) continue;
+            
+            commandQueue.push_back(line.substr(start));
+        }
+        
+        std::cout << "[AGENT] Loaded " << commandQueue.size() << " commands from stdin" << std::endl;
+        return true;
+    }
+    
+    // Interactive REPL mode
+    void enterInteractiveMode() {
+        interactiveMode = true;
+        std::cout << "\n=== TRANSFORMER AGENT (Interactive Mode) ===" << std::endl;
+        std::cout << "Type 'help' for commands. Type 'quit' to exit." << std::endl;
+        
+        std::string input;
+        while (interactiveMode) {
+            std::cout << "\nagent> ";
+            std::getline(std::cin, input);
+            
+            if (input.empty()) continue;
+            
+            if (input == "quit" || input == "exit") {
+                std::cout << "Exiting agent..." << std::endl;
+                break;
+            }
+            
+            auto tokens = parseCommand(input);
+            auto result = executeCommand(tokens);
+            
+            if (!result.success) {
+                std::cout << "ERROR: " << result.message << std::endl;
+            }
+        }
+    }
+    
+    TransformerModel& getModel() {
+        return model;
+    }
+    
+    // Execute queued commands (for batch/script mode)
+    void executeQueuedCommands() {
+        if (commandQueue.empty()) {
+            std::cout << "[AGENT] No queued commands to execute" << std::endl;
+            return;
+        }
+        
+        executePipeline(commandQueue);
+    }
+    
+    // Get current command queue size
+    size_t getQueueSize() const {
+        return commandQueue.size();
+    }
+};
+
 int main(int argc, char* argv[]) {
     std::cout << "========================================" << std::endl;
-    std::cout << "  GPT-2 CLI - CUDA Implementation" << std::endl;
-    std::cout << "  Full GGML/LLaMA2 Dequantization" << std::endl;
+    std::cout << "  TRANSFORMER AGENT - CUDA Implementation" << std::endl;
+    std::cout << "  Full GGML/LLaMA2 Dequantization + Agent" << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << std::endl;
 
@@ -2234,110 +2912,112 @@ int main(int argc, char* argv[]) {
     }
     std::cout << std::endl;
 
-    TransformerModel model;
+    // Initialize agent
+    TransformerAgent agent;
 
-    std::cout << "Loading model from: " << args.ggufPath << std::endl;
-    if (!model.loadModel(args.ggufPath, args.showQuantStats)) {
-        std::cerr << "ERROR: Failed to load model" << std::endl;
-        return 1;
+    // If model path is provided, load it
+    if (!args.ggufPath.empty()) {
+        std::cout << "Loading model from: " << args.ggufPath << std::endl;
+        auto loadResult = agent.actionLoadModel(args.ggufPath, args.tokenizerPath);
+        if (!loadResult.success) {
+            std::cerr << "ERROR: Failed to load model" << std::endl;
+            return 1;
+        }
+
+        if (args.listTensors) {
+            agent.getModel().printTensorNames();
+            return 0;
+        }
+
+        if (args.showQuantStats) {
+            agent.getModel().printQuantizationStats();
+        }
     }
 
-    if (args.listTensors) {
-        model.printTensorNames();
+    // Mode 1: Script/Batch mode (file with commands)
+    if (!args.inputFile.empty()) {
+        if (args.inputFile == "-") {
+            // Read from stdin
+            std::cout << "\n[AGENT] Reading commands from stdin..." << std::endl;
+            if (!agent.loadStdin()) {
+                std::cerr << "ERROR: Failed to read from stdin" << std::endl;
+                return 1;
+            }
+        } else {
+            // Read from file
+            std::cout << "\n[AGENT] Loading script from file: " << args.inputFile << std::endl;
+            if (!agent.loadScript(args.inputFile)) {
+                std::cerr << "ERROR: Failed to load script" << std::endl;
+                return 1;
+            }
+        }
+        
+        if (agent.getQueueSize() > 0) {
+            std::cout << "\n[AGENT] Executing " << agent.getQueueSize() << " queued commands..." << std::endl;
+            agent.executeQueuedCommands();
+            std::cout << "\n[AGENT] Batch execution complete" << std::endl;
+        } else {
+            std::cout << "[AGENT] No commands to execute" << std::endl;
+        }
         return 0;
     }
 
-    std::cout << std::endl << "Loading tokenizer from: " << args.tokenizerPath << std::endl;
-    if (!model.loadTokenizer(args.tokenizerPath)) {
-        std::cerr << "ERROR: Failed to load tokenizer" << std::endl;
-        return 1;
-    }
+    // Mode 2: Single generation mode (model + prompt provided)
+    if (!args.prompt.empty() && !args.ggufPath.empty()) {
+        std::cout << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "GENERATION CONFIG:" << std::endl;
+        std::cout << "Prompt: \"" << (args.prompt.length() > 60 ? args.prompt.substr(0, 60) + "..." : args.prompt) << "\"" << std::endl;
+        std::cout << "Max tokens: " << args.maxTokens << std::endl;
+        std::cout << "Temperature: " << std::fixed << std::setprecision(2) << args.temperature << std::endl;
+        if (args.topK >= 0.0f) std::cout << "Top-K: " << args.topK << std::endl;
+        if (args.topP < 1.0f) std::cout << "Top-P: " << args.topP << std::endl;
+        if (args.repetitionPenalty != 1.0f) std::cout << "Repetition penalty: " << args.repetitionPenalty << std::endl;
+        if (args.seed >= 0) std::cout << "Seed: " << args.seed << std::endl;
+        std::cout << "Device: " << args.gpuDevice << std::endl;
+        std::cout << "========================================" << std::endl;
 
-    // Read prompt from file or command line
-    std::string prompt = args.prompt;
-    if (!args.inputFile.empty()) {
-        std::ifstream infile(args.inputFile);
-        if (!infile.is_open()) {
-            std::cerr << "ERROR: Cannot open input file: " << args.inputFile << std::endl;
-            return 1;
+        auto result = agent.actionRunInference(args.prompt, args.maxTokens, args.temperature);
+
+        std::cout << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "GENERATED TEXT:" << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << result.output << std::endl;
+        std::cout << "========================================" << std::endl;
+
+        // Save output to file if requested
+        if (!args.outputFile.empty()) {
+            agent.actionSaveOutput(args.outputFile, result.output);
         }
-        std::stringstream buffer;
-        buffer << infile.rdbuf();
-        prompt = buffer.str();
-        if (args.verbose) std::cout << "Loaded prompt from file: " << args.inputFile << std::endl;
-    }
 
-    std::cout << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "GENERATION CONFIG:" << std::endl;
-    std::cout << "Prompt: \"" << (prompt.length() > 60 ? prompt.substr(0, 60) + "..." : prompt) << "\"" << std::endl;
-    std::cout << "Max tokens: " << args.maxTokens << std::endl;
-    std::cout << "Temperature: " << std::fixed << std::setprecision(2) << args.temperature << std::endl;
-    if (args.topK >= 0.0f) std::cout << "Top-K: " << args.topK << std::endl;
-    if (args.topP < 1.0f) std::cout << "Top-P: " << args.topP << std::endl;
-    if (args.repetitionPenalty != 1.0f) std::cout << "Repetition penalty: " << args.repetitionPenalty << std::endl;
-    if (args.seed >= 0) std::cout << "Seed: " << args.seed << std::endl;
-    std::cout << "Device: " << args.gpuDevice << std::endl;
-    std::cout << "========================================" << std::endl;
-
-    auto startTime = std::chrono::high_resolution_clock::now();
-
-    std::string generatedText = model.generate(prompt, args.maxTokens, args.temperature);
-
-    auto endTime = std::chrono::high_resolution_clock::now();
-    double totalSecs = std::chrono::duration<double>(endTime - startTime).count();
-
-    std::cout << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "GENERATED TEXT:" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << generatedText << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "Total time: " << std::fixed << std::setprecision(2) << totalSecs << " seconds" << std::endl;
-
-    // Save output to file if requested
-    if (!args.outputFile.empty()) {
-        std::ofstream outfile(args.outputFile);
-        if (!outfile.is_open()) {
-            std::cerr << "ERROR: Cannot open output file: " << args.outputFile << std::endl;
-            return 1;
+        // Run benchmark if requested
+        if (args.benchmark) {
+            std::cout << "\nRunning benchmark (5 iterations)..." << std::endl;
+            double totalTime = 0.0;
+            for (int i = 0; i < 5; i++) {
+                auto t0 = std::chrono::high_resolution_clock::now();
+                auto benchResult = agent.actionRunInference(args.prompt, args.maxTokens, args.temperature);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                double iterTime = std::chrono::duration<double>(t1 - t0).count();
+                totalTime += iterTime;
+                std::cout << "  Iteration " << (i+1) << ": " << std::fixed << std::setprecision(2) << iterTime << "s" << std::endl;
+            }
+            double avgTime = totalTime / 5.0;
+            double tokensPerSec = (args.maxTokens / avgTime);
+            std::cout << "Average: " << std::fixed << std::setprecision(2) << avgTime << "s, "
+                      << tokensPerSec << " tokens/sec" << std::endl;
         }
-        
-        if (args.jsonOutput) {
-            outfile << "{\"prompt\": \"" << prompt << "\", \"output\": \"" << generatedText << "\", "
-                    << "\"tokens\": " << args.maxTokens << ", \"time_seconds\": " << totalSecs << "}" << std::endl;
-        } else {
-            outfile << generatedText << std::endl;
-        }
-        
-        outfile.close();
-        std::cout << "Output saved to: " << args.outputFile << std::endl;
+
+        return 0;
     }
 
-    // JSON output to stdout if requested
-    if (args.jsonOutput && args.outputFile.empty()) {
-        std::cout << "\nJSON Output:" << std::endl;
-        std::cout << "{\"prompt\": \"" << prompt << "\", \"output\": \"" << generatedText << "\", "
-                  << "\"tokens\": " << args.maxTokens << ", \"time_seconds\": " << totalSecs << "}" << std::endl;
+    // Mode 3: Interactive REPL mode (no model or prompt provided)
+    if (args.ggufPath.empty()) {
+        std::cout << "[AGENT] No model specified. Entering interactive mode." << std::endl;
+        std::cout << "[AGENT] Type 'load <model.gguf> <tokenizer.json>' to start." << std::endl;
     }
-
-    // Run benchmark if requested
-    if (args.benchmark) {
-        std::cout << "\nRunning benchmark (5 iterations)..." << std::endl;
-        double totalTime = 0.0;
-        for (int i = 0; i < 5; i++) {
-            auto t0 = std::chrono::high_resolution_clock::now();
-            std::string benchOutput = model.generate(prompt, args.maxTokens, args.temperature);
-            auto t1 = std::chrono::high_resolution_clock::now();
-            double iterTime = std::chrono::duration<double>(t1 - t0).count();
-            totalTime += iterTime;
-            std::cout << "  Iteration " << (i+1) << ": " << std::fixed << std::setprecision(2) << iterTime << "s" << std::endl;
-        }
-        double avgTime = totalTime / 5.0;
-        double tokensPerSec = (args.maxTokens / avgTime);
-        std::cout << "Average: " << std::fixed << std::setprecision(2) << avgTime << "s, "
-                  << tokensPerSec << " tokens/sec" << std::endl;
-    }
+    agent.enterInteractiveMode();
 
     return 0;
 }
