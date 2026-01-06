@@ -50,9 +50,321 @@
         } \
     } while(0)
 
+// ==================== Device Management (Inline) ====================
+
+enum class DeviceType {
+    GPU,
+    CPU
+};
+
+struct LayerDeviceConfig {
+    int numLayers = 0;
+    std::vector<DeviceType> devices;
+    
+    LayerDeviceConfig(int n) : numLayers(n), devices(n, DeviceType::GPU) {}
+    
+    DeviceType getDevice(int layerIdx) const {
+        if (layerIdx < 0 || layerIdx >= numLayers) return DeviceType::GPU;
+        return devices[layerIdx];
+    }
+    
+    void setDevice(int layerIdx, DeviceType dev) {
+        if (layerIdx >= 0 && layerIdx < numLayers) {
+            devices[layerIdx] = dev;
+        }
+    }
+    
+    void setAllGPU() {
+        for (int i = 0; i < numLayers; i++) devices[i] = DeviceType::GPU;
+    }
+    
+    void setAllCPU() {
+        for (int i = 0; i < numLayers; i++) devices[i] = DeviceType::CPU;
+    }
+    
+    int countGPULayers() const {
+        int count = 0;
+        for (const auto& dev : devices) {
+            if (dev == DeviceType::GPU) count++;
+        }
+        return count;
+    }
+    
+    int countCPULayers() const {
+        return numLayers - countGPULayers();
+    }
+    
+    std::string toString() const {
+        std::string result = "Layer devices: [";
+        for (int i = 0; i < numLayers; i++) {
+            if (i > 0) result += ", ";
+            result += (devices[i] == DeviceType::GPU) ? "GPU" : "CPU";
+        }
+        result += "]";
+        return result;
+    }
+};
+
+LayerDeviceConfig parseLayerDevices(const std::string& spec, int numLayers) {
+    LayerDeviceConfig config(numLayers);
+    config.setAllGPU();
+    
+    if (spec.empty()) return config;
+    
+    size_t pos = 0;
+    while (pos < spec.length()) {
+        size_t commaPos = spec.find(',', pos);
+        if (commaPos == std::string::npos) commaPos = spec.length();
+        
+        std::string token = spec.substr(pos, commaPos - pos);
+        try {
+            int layerIdx = std::stoi(token);
+            if (layerIdx >= 0 && layerIdx < numLayers) {
+                config.setDevice(layerIdx, DeviceType::CPU);
+            }
+        } catch (...) {
+            // Skip invalid tokens
+        }
+        
+        pos = commaPos + 1;
+    }
+    
+    return config;
+}
+
+// ==================== CPU Layer Implementations (Inline) ====================
+
+inline float gelu_cpu(float x) {
+    float cdf = 0.5f * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
+    return x * cdf;
+}
+
+void layerNorm_cpu(const float* input, float* output, const float* gamma, const float* beta,
+                   int seqLen, int dim, float eps = 1e-5f) {
+    for (int pos = 0; pos < seqLen; pos++) {
+        int offset = pos * dim;
+        
+        float mean = 0.0f;
+        for (int i = 0; i < dim; i++) {
+            mean += input[offset + i];
+        }
+        mean /= dim;
+        
+        float variance = 0.0f;
+        for (int i = 0; i < dim; i++) {
+            float diff = input[offset + i] - mean;
+            variance += diff * diff;
+        }
+        variance /= dim;
+        
+        float invStd = 1.0f / sqrtf(variance + eps);
+        for (int i = 0; i < dim; i++) {
+            float normalized = (input[offset + i] - mean) * invStd;
+            float g = (gamma != nullptr) ? gamma[i] : 1.0f;
+            float b = (beta != nullptr) ? beta[i] : 0.0f;
+            output[offset + i] = normalized * g + b;
+        }
+    }
+}
+
+void matmul_cpu(const float* A, const float* B, float* C, int M, int N, int K, 
+                const float* bias = nullptr) {
+    for (int i = 0; i < M; i++) {
+        for (int j = 0; j < N; j++) {
+            float sum = (bias != nullptr) ? bias[j] : 0.0f;
+            for (int k = 0; k < K; k++) {
+                sum += A[i * K + k] * B[j * K + k];
+            }
+            C[i * N + j] = sum;
+        }
+    }
+}
+
+void softmax_cpu(float* data, int rows, int cols) {
+    for (int row = 0; row < rows; row++) {
+        int offset = row * cols;
+        
+        float maxVal = data[offset];
+        for (int i = 1; i < cols; i++) {
+            maxVal = fmaxf(maxVal, data[offset + i]);
+        }
+        
+        float sum = 0.0f;
+        for (int i = 0; i < cols; i++) {
+            float val = expf(data[offset + i] - maxVal);
+            data[offset + i] = val;
+            sum += val;
+        }
+        
+        for (int i = 0; i < cols; i++) {
+            data[offset + i] /= sum;
+        }
+    }
+}
+
+void addResidual_cpu(float* output, const float* residual, int size) {
+    for (int i = 0; i < size; i++) {
+        output[i] += residual[i];
+    }
+}
+
+void applyRoPE_cpu(float* Q, float* K, int seqLen, int numHeads, int headDim) {
+    for (int pos = 0; pos < seqLen; pos++) {
+        for (int h = 0; h < numHeads; h++) {
+            for (int i = 0; i + 1 < headDim; i += 2) {
+                float theta = powf(10000.0f, -2.0f * i / headDim);
+                float angle = pos * theta;
+                float cosAngle = cosf(angle);
+                float sinAngle = sinf(angle);
+                
+                int headStart = h * headDim;
+                int qIdx = pos * (numHeads * headDim) + headStart + i;
+                int kIdx = pos * (numHeads * headDim) + headStart + i;
+                
+                float q0 = Q[qIdx];
+                float q1 = Q[qIdx + 1];
+                float k0 = K[kIdx];
+                float k1 = K[kIdx + 1];
+                
+                Q[qIdx] = q0 * cosAngle - q1 * sinAngle;
+                Q[qIdx + 1] = q0 * sinAngle + q1 * cosAngle;
+                K[kIdx] = k0 * cosAngle - k1 * sinAngle;
+                K[kIdx + 1] = k0 * sinAngle + k1 * cosAngle;
+            }
+        }
+    }
+}
+
+void attentionScores_cpu(const float* Q, const float* K, float* scores, 
+                         int seqLen, int numHeads, int headDim, float scale) {
+    for (int h = 0; h < numHeads; h++) {
+        for (int pos = 0; pos < seqLen; pos++) {
+            for (int srcPos = 0; srcPos < seqLen; srcPos++) {
+                if (srcPos > pos) {
+                    scores[h * seqLen * seqLen + pos * seqLen + srcPos] = -1e9f;
+                } else {
+                    int headStart = h * headDim;
+                    float sum = 0.0f;
+                    for (int i = 0; i < headDim; i++) {
+                        sum += Q[pos * (numHeads * headDim) + headStart + i] *
+                               K[srcPos * (numHeads * headDim) + headStart + i];
+                    }
+                    scores[h * seqLen * seqLen + pos * seqLen + srcPos] = sum / scale;
+                }
+            }
+        }
+    }
+}
+
+void attentionOutput_cpu(const float* attnWeights, const float* V, float* output,
+                         int seqLen, int numHeads, int headDim) {
+    for (int h = 0; h < numHeads; h++) {
+        for (int pos = 0; pos < seqLen; pos++) {
+            for (int i = 0; i < headDim; i++) {
+                int headStart = h * headDim;
+                float sum = 0.0f;
+                for (int srcPos = 0; srcPos < seqLen; srcPos++) {
+                    sum += attnWeights[h * seqLen * seqLen + pos * seqLen + srcPos] *
+                           V[srcPos * (numHeads * headDim) + headStart + i];
+                }
+                output[pos * (numHeads * headDim) + headStart + i] = sum;
+            }
+        }
+    }
+}
+
+void ffnUpGELU_cpu(const float* input, const float* weight, const float* bias,
+                   float* output, int seqLen, int embedDim, int ffnDim) {
+    for (int pos = 0; pos < seqLen; pos++) {
+        for (int i = 0; i < ffnDim; i++) {
+            float sum = (bias != nullptr) ? bias[i] : 0.0f;
+            for (int j = 0; j < embedDim; j++) {
+                sum += input[pos * embedDim + j] * weight[i * embedDim + j];
+            }
+            float cdf = 0.5f * (1.0f + tanhf(0.7978845608f * (sum + 0.044715f * sum * sum * sum)));
+            output[pos * ffnDim + i] = sum * cdf;
+        }
+    }
+}
+
+void ffnUpSwiGLU_cpu(const float* input, const float* weightUp, const float* biasUp,
+                     const float* weightGate, const float* biasGate,
+                     float* output, int seqLen, int embedDim, int ffnDim) {
+    for (int pos = 0; pos < seqLen; pos++) {
+        for (int i = 0; i < ffnDim; i++) {
+            float upVal = (biasUp != nullptr) ? biasUp[i] : 0.0f;
+            for (int j = 0; j < embedDim; j++) {
+                upVal += input[pos * embedDim + j] * weightUp[i * embedDim + j];
+            }
+            
+            float gateVal = (biasGate != nullptr) ? biasGate[i] : 0.0f;
+            for (int j = 0; j < embedDim; j++) {
+                gateVal += input[pos * embedDim + j] * weightGate[i * embedDim + j];
+            }
+            
+            float sigmoid = 1.0f / (1.0f + expf(-gateVal));
+            float swish = gateVal * sigmoid;
+            output[pos * ffnDim + i] = upVal * swish;
+        }
+    }
+}
+
+void ffnDown_cpu(const float* input, const float* weight, const float* bias,
+                 float* output, const float* residual,
+                 int seqLen, int ffnDim, int embedDim) {
+    for (int pos = 0; pos < seqLen; pos++) {
+        for (int i = 0; i < embedDim; i++) {
+            float sum = (bias != nullptr) ? bias[i] : 0.0f;
+            for (int j = 0; j < ffnDim; j++) {
+                sum += input[pos * ffnDim + j] * weight[i * ffnDim + j];
+            }
+            output[pos * embedDim + i] = residual[pos * embedDim + i] + sum;
+        }
+    }
+}
+
 constexpr int MAX_SEQ_LEN = 1024;
 constexpr const char* GGUF_MAGIC = "GGUF";
 constexpr int BLOCK_SIZE = 256;
+
+// ==================== Unified Layer Dispatch (Inline) ====================
+
+inline void layerNorm(const float* input, float* output, const float* gamma, const float* beta,
+                      int seqLen, int dim, DeviceType device, int blockSize = 256);
+
+inline void computeQKV(const float* normInput, const float* weight, const float* bias,
+                       float* Q, float* K, float* V, int seqLen, int embedDim,
+                       DeviceType device, int blockSize = 256);
+
+inline void applyRoPE(float* Q, float* K, int seqLen, int numHeads, int headDim,
+                      DeviceType device, int blockSize = 128);
+
+inline void attentionScores(const float* Q, const float* K, float* scores,
+                            int seqLen, int numHeads, int numKVHeads, int headDim, float scale,
+                            DeviceType device, bool useGQA = false, int blockSize = 256);
+
+inline void softmax(float* data, int rows, int cols, DeviceType device, int blockSize = 256);
+
+inline void attentionOutput(const float* attnWeights, const float* V, float* output,
+                           int seqLen, int numHeads, int numKVHeads, int headDim,
+                           DeviceType device, bool useGQA = false, int blockSize = 256);
+
+inline void projection(const float* input, const float* weight, const float* bias,
+                      float* output, const float* residual, int seqLen, int embedDim,
+                      DeviceType device, int blockSize = 256);
+
+inline void ffnUpGELU(const float* input, const float* weight, const float* bias,
+                     float* output, int seqLen, int embedDim, int ffnDim,
+                     DeviceType device, int blockSize = 256);
+
+inline void ffnUpSwiGLU(const float* input, const float* weightUp, const float* biasUp,
+                       const float* weightGate, const float* biasGate,
+                       float* output, int seqLen, int embedDim, int ffnDim,
+                       DeviceType device, int blockSize = 256);
+
+inline void ffnDown(const float* input, const float* weight, const float* bias,
+                   float* output, const float* residual, int seqLen, int ffnDim, int embedDim,
+                   DeviceType device, int blockSize = 256);
 
 // ==================== Quantization Type Registry ====================
 
@@ -515,6 +827,205 @@ __global__ void ffnDownKernel(const float* input, const float* weight, const flo
             sum += input[pos * ffnDim + j] * weight[i * ffnDim + j];
         }
         output[pos * embedDim + i] = residual[pos * embedDim + i] + sum;
+    }
+}
+
+// ==================== Unified Layer Dispatch Implementations (Inline) ====================
+
+inline void layerNorm(const float* input, float* output, const float* gamma, const float* beta,
+                      int seqLen, int dim, DeviceType device, int blockSize) {
+    if (device == DeviceType::CPU) {
+        layerNorm_cpu(input, output, gamma, beta, seqLen, dim);
+    } else {
+        int sharedMem = blockSize * sizeof(float);
+        layerNormKernel<<<seqLen, blockSize, sharedMem>>>(input, output, gamma, beta, seqLen, dim);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+inline void computeQKV(const float* normInput, const float* weight, const float* bias,
+                       float* Q, float* K, float* V, int seqLen, int embedDim,
+                       DeviceType device, int blockSize) {
+    if (device == DeviceType::CPU) {
+        for (int pos = 0; pos < seqLen; pos++) {
+            int offset = pos * embedDim;
+            for (int i = 0; i < embedDim; i++) {
+                float sumQ = (bias != nullptr) ? bias[i] : 0.0f;
+                float sumK = (bias != nullptr) ? bias[embedDim + i] : 0.0f;
+                float sumV = (bias != nullptr) ? bias[2 * embedDim + i] : 0.0f;
+                
+                for (int j = 0; j < embedDim; j++) {
+                    float inp = normInput[offset + j];
+                    sumQ += inp * weight[i * embedDim + j];
+                    sumK += inp * weight[(embedDim + i) * embedDim + j];
+                    sumV += inp * weight[(2 * embedDim + i) * embedDim + j];
+                }
+                
+                Q[offset + i] = sumQ;
+                K[offset + i] = sumK;
+                V[offset + i] = sumV;
+            }
+        }
+    } else {
+        dim3 qkvBlock(blockSize);
+        dim3 qkvGrid((embedDim + blockSize - 1) / blockSize, seqLen);
+        computeQKVKernel<<<qkvGrid, qkvBlock>>>(normInput, weight, bias, Q, K, V, seqLen, embedDim);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+inline void applyRoPE(float* Q, float* K, int seqLen, int numHeads, int headDim,
+                      DeviceType device, int blockSize) {
+    if (device == DeviceType::CPU) {
+        applyRoPE_cpu(Q, K, seqLen, numHeads, headDim);
+    } else {
+        dim3 ropeBlock(blockSize);
+        dim3 ropeGrid(seqLen, numHeads);
+        applyRoPEKernel<<<ropeGrid, ropeBlock>>>(Q, K, seqLen, numHeads, headDim);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+inline void attentionScores(const float* Q, const float* K, float* scores,
+                            int seqLen, int numHeads, int numKVHeads, int headDim, float scale,
+                            DeviceType device, bool useGQA, int blockSize) {
+    if (device == DeviceType::CPU) {
+        if (useGQA) {
+            for (int h = 0; h < numHeads; h++) {
+                for (int pos = 0; pos < seqLen; pos++) {
+                    for (int srcPos = 0; srcPos < seqLen; srcPos++) {
+                        if (srcPos > pos) {
+                            scores[h * seqLen * seqLen + pos * seqLen + srcPos] = -1e9f;
+                        } else {
+                            int kvHeadIdx = h * numKVHeads / numHeads;
+                            int headStart = kvHeadIdx * headDim;
+                            float sum = 0.0f;
+                            for (int i = 0; i < headDim; i++) {
+                                sum += Q[pos * (numHeads * headDim) + h * headDim + i] *
+                                       K[srcPos * (numKVHeads * headDim) + headStart + i];
+                            }
+                            scores[h * seqLen * seqLen + pos * seqLen + srcPos] = sum / scale;
+                        }
+                    }
+                }
+            }
+        } else {
+            attentionScores_cpu(Q, K, scores, seqLen, numHeads, headDim, scale);
+        }
+    } else {
+        dim3 scoreBlock(blockSize);
+        dim3 scoreGrid((seqLen + blockSize - 1) / blockSize, seqLen, numHeads);
+        
+        if (useGQA) {
+            attentionScoresGQAKernel<<<scoreGrid, scoreBlock>>>(Q, K, scores, seqLen, numHeads, numKVHeads, headDim, scale);
+        } else {
+            attentionScoresKernel<<<scoreGrid, scoreBlock>>>(Q, K, scores, seqLen, numHeads, headDim, scale);
+        }
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+inline void softmax(float* data, int rows, int cols, DeviceType device, int blockSize) {
+    if (device == DeviceType::CPU) {
+        softmax_cpu(data, rows, cols);
+    } else {
+        softmaxKernel<<<rows, blockSize, blockSize * sizeof(float)>>>(data, rows, cols);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+inline void attentionOutput(const float* attnWeights, const float* V, float* output,
+                           int seqLen, int numHeads, int numKVHeads, int headDim,
+                           DeviceType device, bool useGQA, int blockSize) {
+    if (device == DeviceType::CPU) {
+        if (useGQA) {
+            for (int h = 0; h < numHeads; h++) {
+                for (int pos = 0; pos < seqLen; pos++) {
+                    for (int i = 0; i < headDim; i++) {
+                        int kvHeadIdx = h * numKVHeads / numHeads;
+                        float sum = 0.0f;
+                        for (int srcPos = 0; srcPos < seqLen; srcPos++) {
+                            sum += attnWeights[h * seqLen * seqLen + pos * seqLen + srcPos] *
+                                   V[srcPos * (numKVHeads * headDim) + kvHeadIdx * headDim + i];
+                        }
+                        output[pos * (numHeads * headDim) + h * headDim + i] = sum;
+                    }
+                }
+            }
+        } else {
+            attentionOutput_cpu(attnWeights, V, output, seqLen, numHeads, headDim);
+        }
+    } else {
+        dim3 outBlock(blockSize);
+        dim3 outGrid((headDim + blockSize - 1) / blockSize, seqLen, numHeads);
+        
+        if (useGQA) {
+            attentionOutputGQAKernel<<<outGrid, outBlock>>>(attnWeights, V, output, seqLen, numHeads, numKVHeads, headDim);
+        } else {
+            attentionOutputKernel<<<outGrid, outBlock>>>(attnWeights, V, output, seqLen, numHeads, headDim);
+        }
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+inline void projection(const float* input, const float* weight, const float* bias,
+                      float* output, const float* residual, int seqLen, int embedDim,
+                      DeviceType device, int blockSize) {
+    if (device == DeviceType::CPU) {
+        for (int pos = 0; pos < seqLen; pos++) {
+            for (int i = 0; i < embedDim; i++) {
+                float sum = (bias != nullptr) ? bias[i] : 0.0f;
+                for (int j = 0; j < embedDim; j++) {
+                    sum += input[pos * embedDim + j] * weight[i * embedDim + j];
+                }
+                output[pos * embedDim + i] = residual[pos * embedDim + i] + sum;
+            }
+        }
+    } else {
+        dim3 projBlock(blockSize);
+        dim3 projGrid((embedDim + blockSize - 1) / blockSize, seqLen);
+        projectionKernel<<<projGrid, projBlock>>>(input, weight, bias, output, residual, seqLen, embedDim);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+inline void ffnUpGELU(const float* input, const float* weight, const float* bias,
+                     float* output, int seqLen, int embedDim, int ffnDim,
+                     DeviceType device, int blockSize) {
+    if (device == DeviceType::CPU) {
+        ffnUpGELU_cpu(input, weight, bias, output, seqLen, embedDim, ffnDim);
+    } else {
+        dim3 upBlock(blockSize);
+        dim3 upGrid((ffnDim + blockSize - 1) / blockSize, seqLen);
+        ffnUpGELUKernel<<<upGrid, upBlock>>>(input, weight, bias, output, seqLen, embedDim, ffnDim);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+inline void ffnUpSwiGLU(const float* input, const float* weightUp, const float* biasUp,
+                       const float* weightGate, const float* biasGate,
+                       float* output, int seqLen, int embedDim, int ffnDim,
+                       DeviceType device, int blockSize) {
+    if (device == DeviceType::CPU) {
+        ffnUpSwiGLU_cpu(input, weightUp, biasUp, weightGate, biasGate, output, seqLen, embedDim, ffnDim);
+    } else {
+        dim3 upBlock(blockSize);
+        dim3 upGrid((ffnDim + blockSize - 1) / blockSize, seqLen);
+        ffnUpSwiGLUKernel<<<upGrid, upBlock>>>(input, weightUp, biasUp, weightGate, biasGate, output, seqLen, embedDim, ffnDim);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+inline void ffnDown(const float* input, const float* weight, const float* bias,
+                   float* output, const float* residual, int seqLen, int ffnDim, int embedDim,
+                   DeviceType device, int blockSize) {
+    if (device == DeviceType::CPU) {
+        ffnDown_cpu(input, weight, bias, output, residual, seqLen, ffnDim, embedDim);
+    } else {
+        dim3 downBlock(blockSize);
+        dim3 downGrid((embedDim + blockSize - 1) / blockSize, seqLen);
+        ffnDownKernel<<<downGrid, downBlock>>>(input, weight, bias, output, residual, seqLen, ffnDim, embedDim);
+        CUDA_CHECK(cudaGetLastError());
     }
 }
 
@@ -1588,6 +2099,19 @@ private:
     float* d_logits = nullptr;
     int* d_tokenIDs = nullptr;
     
+    // CPU memory buffers for CPU-executed layers
+    float* h_hidden = nullptr;
+    float* h_hidden2 = nullptr;
+    float* h_Q = nullptr;
+    float* h_K = nullptr;
+    float* h_V = nullptr;
+    float* h_attnOut = nullptr;
+    float* h_attnScores = nullptr;
+    float* h_ffnHidden = nullptr;
+    
+    // Device configuration
+    LayerDeviceConfig* layerDeviceConfig = nullptr;
+    
     int allocatedSeqLen = 0;
 
     void allocateBuffers(int seqLen) {
@@ -1595,6 +2119,7 @@ private:
         
         freeBuffers();
         
+        // GPU buffers (always allocate)
         CUDA_CHECK(cudaMalloc(&d_hidden, seqLen * embedDim * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_hidden2, seqLen * embedDim * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_Q, seqLen * embedDim * sizeof(float)));
@@ -1606,10 +2131,21 @@ private:
         CUDA_CHECK(cudaMalloc(&d_logits, vocabSize * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_tokenIDs, seqLen * sizeof(int)));
         
+        // CPU buffers (for CPU-offloaded layers)
+        h_hidden = new float[seqLen * embedDim];
+        h_hidden2 = new float[seqLen * embedDim];
+        h_Q = new float[seqLen * embedDim];
+        h_K = new float[seqLen * embedDim];
+        h_V = new float[seqLen * embedDim];
+        h_attnOut = new float[seqLen * embedDim];
+        h_attnScores = new float[numHeads * seqLen * seqLen];
+        h_ffnHidden = new float[seqLen * ffnDim];
+        
         allocatedSeqLen = seqLen;
     }
 
     void freeBuffers() {
+        // Free GPU buffers
         if (d_hidden) cudaFree(d_hidden);
         if (d_hidden2) cudaFree(d_hidden2);
         if (d_Q) cudaFree(d_Q);
@@ -1622,6 +2158,18 @@ private:
         if (d_tokenIDs) cudaFree(d_tokenIDs);
         d_hidden = d_hidden2 = d_Q = d_K = d_V = d_attnOut = d_attnScores = d_ffnHidden = d_logits = nullptr;
         d_tokenIDs = nullptr;
+        
+        // Free CPU buffers
+        if (h_hidden) delete[] h_hidden;
+        if (h_hidden2) delete[] h_hidden2;
+        if (h_Q) delete[] h_Q;
+        if (h_K) delete[] h_K;
+        if (h_V) delete[] h_V;
+        if (h_attnOut) delete[] h_attnOut;
+        if (h_attnScores) delete[] h_attnScores;
+        if (h_ffnHidden) delete[] h_ffnHidden;
+        h_hidden = h_hidden2 = h_Q = h_K = h_V = h_attnOut = h_attnScores = h_ffnHidden = nullptr;
+        
         allocatedSeqLen = 0;
     }
 
@@ -1644,6 +2192,9 @@ private:
     }
 
     void attentionBlock(int seqLen, int layerIdx) {
+        // Get device for this layer
+        DeviceType device = layerDeviceConfig->getDevice(layerIdx);
+        
         // Support multiple naming conventions (GPT-2, LLaMA, etc.)
         std::string gpt2Prefix = "blk." + std::to_string(layerIdx) + ".";
         std::string llamaPrefix = "model.layers." + std::to_string(layerIdx) + ".self_attn.";
@@ -1673,57 +2224,66 @@ private:
             llamaPrefix + "o_proj.bias"
         });
         
-        int sharedMem = BLOCK_SIZE * sizeof(float);
-        layerNormKernel<<<seqLen, BLOCK_SIZE, sharedMem>>>(d_hidden, d_hidden2, d_ln1g, d_ln1b, seqLen, embedDim);
+        // Get pointers based on device
+        float* hidden_in = (device == DeviceType::GPU) ? d_hidden : h_hidden;
+        float* hidden_out = (device == DeviceType::GPU) ? d_hidden2 : h_hidden2;
+        float* Q = (device == DeviceType::GPU) ? d_Q : h_Q;
+        float* K = (device == DeviceType::GPU) ? d_K : h_K;
+        float* V = (device == DeviceType::GPU) ? d_V : h_V;
+        float* attnOut = (device == DeviceType::GPU) ? d_attnOut : h_attnOut;
+        float* attnScores = (device == DeviceType::GPU) ? d_attnScores : h_attnScores;
         
-        dim3 qkvBlock(BLOCK_SIZE);
-        dim3 qkvGrid((embedDim + BLOCK_SIZE - 1) / BLOCK_SIZE, seqLen);
-        computeQKVKernel<<<qkvGrid, qkvBlock>>>(d_hidden2, d_qkvW, d_qkvB, d_Q, d_K, d_V, seqLen, embedDim);
+        // Transfer data to target device if switching
+        if (device == DeviceType::CPU) {
+            CUDA_CHECK(cudaMemcpy(h_hidden, d_hidden, seqLen * embedDim * sizeof(float), cudaMemcpyDeviceToHost));
+        } else {
+            CUDA_CHECK(cudaMemcpy(d_hidden, h_hidden, seqLen * embedDim * sizeof(float), cudaMemcpyHostToDevice));
+        }
+        
+        // Layer norm
+        layerNorm(hidden_in, hidden_out, d_ln1g, d_ln1b, seqLen, embedDim, device, BLOCK_SIZE);
+        
+        // Compute QKV
+        computeQKV(hidden_out, d_qkvW, d_qkvB, Q, K, V, seqLen, embedDim, device, BLOCK_SIZE);
         
         // Apply RoPE if needed
         if (posEmbedding == PositionalEmbedding::ROPE) {
-            dim3 ropeBlock(BLOCK_SIZE / 2);
-            dim3 ropeGrid(seqLen, numHeads);
-            applyRoPEKernel<<<ropeGrid, ropeBlock>>>(d_Q, d_K, seqLen, numHeads, headDim);
-            CUDA_CHECK(cudaGetLastError());
+            applyRoPE(Q, K, seqLen, numHeads, headDim, device, BLOCK_SIZE / 2);
         }
         
         float scale = sqrtf((float)headDim);
-        dim3 scoreBlock(BLOCK_SIZE);
         
-        // Use appropriate attention kernel based on type
-        if (attentionType == AttentionType::STANDARD) {
-            dim3 scoreGrid((seqLen + BLOCK_SIZE - 1) / BLOCK_SIZE, seqLen, numHeads);
-            attentionScoresKernel<<<scoreGrid, scoreBlock>>>(d_Q, d_K, d_attnScores, seqLen, numHeads, headDim, scale);
+        // Attention scores
+        bool useGQA = (attentionType != AttentionType::STANDARD);
+        attentionScores(Q, K, attnScores, seqLen, numHeads, numKVHeads, headDim, scale, device, useGQA, BLOCK_SIZE);
+        
+        // Softmax
+        softmax(attnScores, numHeads * seqLen, seqLen, device, BLOCK_SIZE);
+        
+        // Attention output
+        attentionOutput(attnScores, V, attnOut, seqLen, numHeads, numKVHeads, headDim, device, useGQA, BLOCK_SIZE);
+        
+        // Projection
+        projection(attnOut, d_projW, d_projB, hidden_out, hidden_in, seqLen, embedDim, device, BLOCK_SIZE);
+        
+        // Swap hidden states
+        std::swap(hidden_in, hidden_out);
+        if (device == DeviceType::GPU) {
+            std::swap(d_hidden, d_hidden2);
         } else {
-            dim3 scoreGrid((seqLen + BLOCK_SIZE - 1) / BLOCK_SIZE, seqLen, numHeads);
-            attentionScoresGQAKernel<<<scoreGrid, scoreBlock>>>(d_Q, d_K, d_attnScores, seqLen, numHeads, numKVHeads, headDim, scale);
+            std::swap(h_hidden, h_hidden2);
         }
         
-        for (int h = 0; h < numHeads; h++) {
-            softmaxKernel<<<seqLen, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
-                d_attnScores + h * seqLen * seqLen, seqLen, seqLen);
+        // Transfer back to GPU if needed
+        if (device == DeviceType::CPU) {
+            CUDA_CHECK(cudaMemcpy(d_hidden, h_hidden, seqLen * embedDim * sizeof(float), cudaMemcpyHostToDevice));
         }
-        
-        dim3 outBlock(BLOCK_SIZE);
-        dim3 outGrid((headDim + BLOCK_SIZE - 1) / BLOCK_SIZE, seqLen, numHeads);
-        
-        if (attentionType == AttentionType::STANDARD) {
-            attentionOutputKernel<<<outGrid, outBlock>>>(d_attnScores, d_V, d_attnOut, seqLen, numHeads, headDim);
-        } else {
-            attentionOutputGQAKernel<<<outGrid, outBlock>>>(d_attnScores, d_V, d_attnOut, seqLen, numHeads, numKVHeads, headDim);
-        }
-        
-        dim3 projBlock(BLOCK_SIZE);
-        dim3 projGrid((embedDim + BLOCK_SIZE - 1) / BLOCK_SIZE, seqLen);
-        projectionKernel<<<projGrid, projBlock>>>(d_attnOut, d_projW, d_projB, d_hidden2, d_hidden, seqLen, embedDim);
-        
-        std::swap(d_hidden, d_hidden2);
-        
-        CUDA_CHECK(cudaGetLastError());
     }
 
     void ffnBlock(int seqLen, int layerIdx) {
+        // Get device for this layer
+        DeviceType device = layerDeviceConfig->getDevice(layerIdx);
+        
         // Support multiple naming conventions (GPT-2, LLaMA, etc.)
         std::string gpt2Prefix = "blk." + std::to_string(layerIdx) + ".";
         std::string llamaPrefix = "model.layers." + std::to_string(layerIdx) + ".mlp.";
@@ -1737,11 +2297,20 @@ private:
             llamaPrefix + "post_attention_layernorm.bias"
         });
         
-        int sharedMem = BLOCK_SIZE * sizeof(float);
-        layerNormKernel<<<seqLen, BLOCK_SIZE, sharedMem>>>(d_hidden, d_hidden2, d_ln2g, d_ln2b, seqLen, embedDim);
+        // Get pointers based on device
+        float* hidden_in = (device == DeviceType::GPU) ? d_hidden : h_hidden;
+        float* hidden_out = (device == DeviceType::GPU) ? d_hidden2 : h_hidden2;
+        float* ffnHidden = (device == DeviceType::GPU) ? d_ffnHidden : h_ffnHidden;
         
-        dim3 upBlock(BLOCK_SIZE);
-        dim3 upGrid((ffnDim + BLOCK_SIZE - 1) / BLOCK_SIZE, seqLen);
+        // Transfer data to target device if switching
+        if (device == DeviceType::CPU) {
+            CUDA_CHECK(cudaMemcpy(h_hidden, d_hidden, seqLen * embedDim * sizeof(float), cudaMemcpyDeviceToHost));
+        } else {
+            CUDA_CHECK(cudaMemcpy(d_hidden, h_hidden, seqLen * embedDim * sizeof(float), cudaMemcpyHostToDevice));
+        }
+        
+        // Layer norm
+        layerNorm(hidden_in, hidden_out, d_ln2g, d_ln2b, seqLen, embedDim, device, BLOCK_SIZE);
         
         if (ffnActivation == FFNActivation::GELU) {
             // GPT-2 style: single projection + GELU
@@ -1753,7 +2322,7 @@ private:
                 gpt2Prefix + "ffn_up.bias",
                 llamaPrefix + "up_proj.bias"
             });
-            ffnUpGELUKernel<<<upGrid, upBlock>>>(d_hidden2, d_upW, d_upB, d_ffnHidden, seqLen, embedDim, ffnDim);
+            ffnUpGELU(hidden_out, d_upW, d_upB, ffnHidden, seqLen, embedDim, ffnDim, device, BLOCK_SIZE);
         } else {
             // LLaMA style: gate projection + up projection + SwiGLU
             float* d_upW = loader.getTensorGPU({
@@ -1772,7 +2341,7 @@ private:
                 gpt2Prefix + "ffn_gate.bias",
                 llamaPrefix + "gate_proj.bias"
             });
-            ffnUpSwiGLUKernel<<<upGrid, upBlock>>>(d_hidden2, d_upW, d_upB, d_gateW, d_gateB, d_ffnHidden, seqLen, embedDim, ffnDim);
+            ffnUpSwiGLU(hidden_out, d_upW, d_upB, d_gateW, d_gateB, ffnHidden, seqLen, embedDim, ffnDim, device, BLOCK_SIZE);
         }
         
         float* d_downW = loader.getTensorGPU({
@@ -1784,13 +2353,20 @@ private:
             llamaPrefix + "down_proj.bias"
         });
         
-        dim3 downBlock(BLOCK_SIZE);
-        dim3 downGrid((embedDim + BLOCK_SIZE - 1) / BLOCK_SIZE, seqLen);
-        ffnDownKernel<<<downGrid, downBlock>>>(d_ffnHidden, d_downW, d_downB, d_hidden2, d_hidden, seqLen, ffnDim, embedDim);
+        ffnDown(ffnHidden, d_downW, d_downB, hidden_out, hidden_in, seqLen, ffnDim, embedDim, device, BLOCK_SIZE);
         
-        std::swap(d_hidden, d_hidden2);
+        // Swap hidden states
+        std::swap(hidden_in, hidden_out);
+        if (device == DeviceType::GPU) {
+            std::swap(d_hidden, d_hidden2);
+        } else {
+            std::swap(h_hidden, h_hidden2);
+        }
         
-        CUDA_CHECK(cudaGetLastError());
+        // Transfer back to GPU if needed
+        if (device == DeviceType::CPU) {
+            CUDA_CHECK(cudaMemcpy(d_hidden, h_hidden, seqLen * embedDim * sizeof(float), cudaMemcpyHostToDevice));
+        }
     }
 
     std::vector<float> computeLogits(int seqLen) {
@@ -1827,10 +2403,17 @@ private:
         int seqLen = tokenIDs.size();
         allocateBuffers(seqLen);
         
+        // Initialize device config if not set
+        if (!layerDeviceConfig) {
+            layerDeviceConfig = new LayerDeviceConfig(numLayers);
+            layerDeviceConfig->setAllGPU();  // Default to all GPU
+        }
+        
         embedTokens(tokenIDs, seqLen);
         
         for (int l = 0; l < numLayers; l++) {
-            std::cout << "\rLayer " << (l + 1) << "/" << numLayers << "..." << std::flush;
+            DeviceType dev = layerDeviceConfig->getDevice(l);
+            std::cout << "\rLayer " << (l + 1) << "/" << numLayers << " [" << (dev == DeviceType::GPU ? "GPU" : "CPU") << "]..." << std::flush;
             attentionBlock(seqLen, l);
             ffnBlock(seqLen, l);
         }
@@ -1845,6 +2428,7 @@ public:
     ~TransformerModel() {
         freeBuffers();
         loader.freeGPUMemory();
+        if (layerDeviceConfig) delete layerDeviceConfig;
     }
 
     bool loadModel(const std::string& ggufPath, bool showStats = true) {
@@ -1897,6 +2481,40 @@ public:
                 attentionType = AttentionType::STANDARD;
             }
         }
+    }
+
+    void setLayerDevices(const std::string& spec) {
+        if (!layerDeviceConfig) {
+            layerDeviceConfig = new LayerDeviceConfig(numLayers);
+        }
+        *layerDeviceConfig = parseLayerDevices(spec, numLayers);
+        std::cout << "Layer device config: " << layerDeviceConfig->toString() << std::endl;
+    }
+    
+    void setAllGPU() {
+        if (!layerDeviceConfig) {
+            layerDeviceConfig = new LayerDeviceConfig(numLayers);
+        }
+        layerDeviceConfig->setAllGPU();
+    }
+    
+    void setAllCPU() {
+        if (!layerDeviceConfig) {
+            layerDeviceConfig = new LayerDeviceConfig(numLayers);
+        }
+        layerDeviceConfig->setAllCPU();
+    }
+    
+    void setLayerDevice(int layerIdx, DeviceType device) {
+        if (!layerDeviceConfig) {
+            layerDeviceConfig = new LayerDeviceConfig(numLayers);
+            layerDeviceConfig->setAllGPU();
+        }
+        layerDeviceConfig->setDevice(layerIdx, device);
+    }
+    
+    LayerDeviceConfig* getLayerDeviceConfig() const {
+        return layerDeviceConfig;
     }
 
     void printArchitectureInfo() {
@@ -2065,6 +2683,10 @@ struct Arguments {
     bool stdinMode = false;
     std::string logFile = "agent_history.log";
     bool enableLogging = true;
+    
+    // CPU offloading options
+    std::string cpuLayers = "";  // Comma-separated layer indices to run on CPU
+    bool allGPU = true;  // Default to all GPU
 };
 
 void printUsage(const char* progName) {
@@ -2123,6 +2745,12 @@ void printUsage(const char* progName) {
     std::cout << "  --batch-size N             Batch size for processing (default: 1)" << std::endl;
     std::cout << "  --memory-limit MB          Limit GPU memory usage in MB (0=unlimited)" << std::endl;
     std::cout << "  --benchmark                Run benchmark tests after generation" << std::endl;
+    std::cout << std::endl;
+    std::cout << "CPU OFFLOADING (Mixed Device Execution):" << std::endl;
+    std::cout << "  --cpu-layers LAYERS        Run specified layers on CPU (e.g., --cpu-layers 0,2,4)" << std::endl;
+    std::cout << "                             Format: comma-separated layer indices (0-based)" << std::endl;
+    std::cout << "  --all-cpu                  Run all transformer layers on CPU (RAM)" << std::endl;
+    std::cout << "  --all-gpu                  Run all transformer layers on GPU (default)" << std::endl;
     std::cout << std::endl;
     std::cout << "DEBUGGING:" << std::endl;
     std::cout << "  -v, --verbose              Enable verbose logging" << std::endl;
@@ -2230,6 +2858,15 @@ Arguments parseArguments(int argc, char* argv[]) {
             args.batchSize = std::stoi(argv[++i]);
         } else if ((arg == "--memory-limit") && i + 1 < argc) {
             args.memoryLimit = std::stoll(argv[++i]);
+        } else if ((arg == "--cpu-layers") && i + 1 < argc) {
+            args.cpuLayers = argv[++i];
+            args.allGPU = false;
+        } else if (arg == "--all-cpu") {
+            args.cpuLayers = "all";
+            args.allGPU = false;
+        } else if (arg == "--all-gpu") {
+            args.allGPU = true;
+            args.cpuLayers = "";
         } else if (arg[0] != '-') {
             if (positionalCount == 0) {
                 args.ggufPath = arg;
@@ -2931,6 +3568,19 @@ int main(int argc, char* argv[]) {
 
         if (args.showQuantStats) {
             agent.getModel().printQuantizationStats();
+        }
+        
+        // Apply CPU offloading configuration
+        if (!args.allGPU) {
+            if (args.cpuLayers == "all") {
+                agent.getModel().setAllCPU();
+                std::cout << "\n[DEVICE] All layers configured to run on CPU" << std::endl;
+            } else if (!args.cpuLayers.empty()) {
+                agent.getModel().setLayerDevices(args.cpuLayers);
+                std::cout << "\n[DEVICE] " << agent.getModel().getLayerDeviceConfig()->toString() << std::endl;
+            }
+        } else {
+            std::cout << "\n[DEVICE] All layers configured to run on GPU (default)" << std::endl;
         }
     }
 
