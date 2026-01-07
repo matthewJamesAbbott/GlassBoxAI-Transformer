@@ -46,7 +46,6 @@ This project provides modular GPU-accelerated transformer inference, agentic ins
 - **GPU-efficient memory management, sequence batching, and buffer allocation.**
 - **Temperature sampling, max-logit, and token generation in CLI.**
 - **Stepwise/debug-inspect attention, FFN, residuals, and all embeddings.**
-- **No icons or logos—just source and docs.**
 - **License:** MIT
 
 ---
