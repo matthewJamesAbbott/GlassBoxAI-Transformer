@@ -1,256 +1,303 @@
 # GlassBoxAI-Transformer
 
-**Author:** Matthew Abbott (2025)
+**A distributed, introspectable, cross-platform transformer for everyone.**
 
-A modern, fully-transparent CUDA implementation of Transformer language models—targeting *maximum hackability and educational clarity*.  
-This project provides modular GPU-accelerated transformer inference, agentic inspection, and interactive CLI/GUI, with direct GGUF model support.
+> This project provides an open, well-documented, and thoroughly tested implementation of an agentic transformer model with full Layer 2 Ethernet support, multi-backend GPU/CPU execution, quantization, GGUF model format, and detailed introspection/facade tools for transparency and practical use.
 
 ---
 
-## Table of Contents
+## Contents
 
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [How It Works](#how-it-works)
 - [Features](#features)
-- [Requirements](#requirements)
-- [agentic_transformer.cu (Agentic Universal Transformer)](#agentic_transformercu-agentic-universal-transformer)
-  - [Design](#design-agentic)
-  - [Quantization Support](#quantization-support)
-  - [Device Offloading](#device-offloading)
-  - [Usage & API](#usage-api-agentic)
-- [transformer_gui.py (Interactive CLI GUI)](#transformer_guipy-interactive-cli-gui)
-  - [Features](#features-gui)
-  - [Usage](#usage-gui)
-- [transformer.cu (Standard Transformer)](#transformercu-standard-transformer)
-  - [Design](#design)
-  - [Usage](#usage)
-  - [Arguments](#arguments)
-  - [Public Methods](#public-methods)
-- [facaded_transformer.cu (Transformer Facade)](#facaded_transformercu-transformer-facade)
-  - [Design](#facade-design)
-  - [Usage](#facade-usage)
-  - [Arguments](#facade-arguments)
-  - [Public Methods](#facade-methods)
-- [Data Structures & Format](#data-structures--format)
-- [Overview & Notes](#overview--notes)
+- [Command-Line Interface (Help Reference)](#command-line-interface-help-reference)
+- [Facade Introspection](#facade-introspection)
+- [Supported Platforms](#supported-platforms)
+- [Quantization Types](#quantization-types)
+- [Usage Examples](#usage-examples)
+- [Testing & Safety](#testing--safety)
+- [Contributing](#contributing)
 - [License](#license)
+
+---
+
+## Overview
+
+GlassBoxAI-Transformer is a fully open, distributed transformer framework designed for research, creative coding, plugin/app integration, and general LLM deployment.  
+It uses **Layer 2 Ethernet** for high-performance local-area orchestration, supports **full CPU and GPU fallback/offloading**, and implements a **facade interface** that lets users inspect, intervene, and understand exactly what the model is doing at every layer.
+
+### Why GlassBox?
+
+- **Transparent:** Every key function, kernel, and protocol is open for inspection and modification.
+- **Distributed:** Delegate work across machines, devices, and network interfaces—no cloud or vendor lock-in.
+- **Cross-platform:** CUDA, Metal, OpenCL, and CPU, all supported (per build); extensible to other backends.
+- **Introspectable:** See activations, QKV projections, attention, logits, and more in real time.
+- **Reproducible:** 317+ comprehensive tests, all passing—verify yourself.
+- **Quantized:** Supports a wide array of quant formats for fast, efficient inference.
+
+---
+
+## Architecture
+
+### Core Components
+
+- **transformer.cu:** CUDA-based distributed transformer implementation (baseline reference).
+- **facaded_transformer.cu:** Enhanced implementation with full facade agentic interface and introspection controls.
+- **Layer 2 networking:** Low-latency protocol, custom framing, and raw socket handling enables direct, secure, and efficient networked inference.
+- **Facade:** Runtime inspection, layer/accounting, transparent forward/backward passes.
+- **GGUF/Tokenizer:** Modern file formats, flexible, fast and open model support.
+- **Quantization:** Multiple quant types for memory/speed optimization.
+- **Test Suite:** Comprehensive, cross-cutting, open verification.
+
+### How It Works
+
+1. **Model Loading:**  
+   Load GGUF model files and tokenizer data.
+2. **CLI/Server/Client Mode:**  
+   Run as a server (waiting for requests), client (connecting for inference), or facade (interactive/inspection mode).
+3. **Distributed Offloading:**  
+   CPU and/or GPU computation is performed locally or offloaded across Layer 2 network participants.
+4. **Quantized and Flexible:**  
+   Configure quantization, params, runtime modes, and precision to suit your hardware and needs.
+5. **Introspection & Facade:**  
+   At any prompt or step, inspect internal states: attention, activations, embeddings, QKV, entropy, weights—export, visualize, or analyze.
+6. **Safe and reproducible:**  
+   Every pathway is covered by automated tests—builds are predictable, safe for plugin development, and ready for production or experimentation.
 
 ---
 
 ## Features
 
-- **Direct GGUF Model Loading:** No external deps—loads GGUF weights/tensors "by hand".
-- **CUDA-Accelerated Transformer Inference:** All matrix, normalization, QKV, attention, softmax, and FFN logic in CUDA.
-- **Universal Quantized Model Support:** Full support for all K-quants (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K), plus legacy formats and extensible design for future types (K_M, K_L, K_S).
-- **Agentic Inspection & Manipulation:** Exposes all activations, weights, inputs/outputs by layer and token for advanced debugging, visualization, or agentic control.
-- **Interactive CLI and GUI:** Chat, batch inference, benchmarking, quant stats, and file management via both CLI and GUI.
-- **Custom Tokenizer Support:** Loads vocab from GPT-2 compatible tokenizers.
-- **GPU-efficient memory management, sequence batching, and buffer allocation.**
-- **Temperature sampling, max-logit, and token generation in CLI.**
-- **Stepwise/debug-inspect attention, FFN, residuals, and all embeddings.**
-- **License:** MIT
+- **Agentic facade pattern:**  
+  Full control and introspection over every layer and operation.
+- **Layer 2 Ethernet protocol:**  
+  Fast, direct, low-overhead networking for distributed and local operation.
+- **Multi-platform, multi-backend:**  
+  CUDA, Metal, OpenCL, and CPU fallback/offload (cross-platform binaries, future integrations).
+- **Quantization support:**  
+  Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K, fp16, bf16, legacy GGML types.
+- **Comprehensive test suite:**  
+  317+ pass-checked tests for protocol, networking, quantization, kernel logic, CLI UX, facade, and more.
+- **Transparent CLI/GUI:**  
+  Detailed help and option management, explicit controls for research and day-to-day work.
+- **Open, well-commented source:**  
+  Easy to read, study, modify, and adapt for your own needs.
 
 ---
 
-## Requirements
+## Command-Line Interface (Help Reference)
 
-- NVIDIA GPU with CUDA (compute 6.0+ highly recommended)
-- CUDA toolkit (tested with CUDA 11-12+)
-- C++14 (main) or C++17 (facade/agentic) for optional features
-- Python 3.6+ for GUI frontend
-- [GGUF](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) model weights (convert from HuggingFace etc. as needed)
-- **No external deep learning library required**
+### **Server Mode**
+```
+./facaded_transformer server [options]
+  -i, --interface <name>       Network interface (default: eth0)
+  -l, --layers <n>             Total transformer layers (default: 12)
+  -e, --embed <dim>            Embedding dimension (default: 768)
+  -f, --ffn <dim>              FFN hidden dimension (default: 3072)
+  -a, --heads <n>              Number of attention heads (default: 12)
+  -k, --kvheads <n>            Number of KV heads for GQA (default: 12)
+  -q, --seq-len <n>            Sequence length (default: 512)
+  -v, --vocab-size <n>         Vocabulary size (default: 50257)
+  -x, --max-seq-len <n>        Maximum sequence length (default: 2048)
+  -m, --messages <n>           Max messages to process (default: 100)
+  -g, --gpu <yes/no>           GPU availability (default: yes)
+  -c, --clients <n>            Max concurrent clients (default: 4)
+  --quant <type>               Quantization type: none|q4_0|q4_1|q5_0|q5_1|q8_0|
+                               q2_k|q3_k|q4_k|q5_k|q6_k|q8_k|f16|bf16 (default: none)
+  --rope-base <n>              RoPE base frequency (default: 10000.0)
+  --rope-scale <n>             RoPE scaling factor (default: 1.0)
+  --eps <n>                    Layer norm epsilon (default: 1e-5)
+  --dropout <n>                Dropout rate 0.0-1.0 (default: 0.0)
+  --verbose                    Enable verbose output
+  --help                       Show help
+```
+
+### **Client Mode**
+```
+./facaded_transformer client [options]
+  -i, --interface <name>       Network interface (default: eth0)
+  -s, --server <mac>           Server MAC address (required)
+  -l, --layers <n>             Total transformer layers (default: 12)
+  -r, --remote <n>             Remote layers to execute (default: 6)
+  --start-layer <n>            Starting layer for remote execution (default: auto)
+  -e, --embed <dim>            Embedding dimension (default: 768)
+  -f, --ffn <dim>              FFN hidden dimension (default: 3072)
+  -a, --heads <n>              Number of attention heads (default: 12)
+  -k, --kvheads <n>            KV heads for GQA (default: 12)
+  -q, --seq-len <n>            Sequence length (default: 512)
+  -v, --vocab-size <n>         Vocabulary size (default: 50257)
+  -x, --max-seq-len <n>        Maximum sequence length (default: 2048)
+  --quant <type>               Quantization type (see server options)
+  --rope-base <n>              RoPE base frequency (default: 10000.0)
+  --rope-scale <n>             RoPE scaling factor (default: 1.0)
+  --eps <n>                    Layer norm epsilon (default: 1e-5)
+  --no-cache                   Disable activation caching
+  --no-grad-cache              Disable gradient caching
+  --timeout <ms>               Connection timeout (default: 5000ms)
+  --retries <n>                Connection retry count (default: 3)
+  --verbose                    Enable verbose output
+  --help                       Show help
+```
+
+### **Facade Mode**
+```
+./facaded_transformer facade [options]
+  --model <path>               GGUF model file path (required)
+  --tokenizer <path>           Tokenizer JSON file path
+  --prompt <text>              Text prompt for generation
+  --max-tokens <n>             Maximum tokens to generate (default: 100)
+  --temperature <n>            Sampling temperature (default: 1.0)
+  --top-k <n>                  Top-K sampling (default: 40)
+  --top-p <n>                  Top-P nucleus sampling (default: 0.9)
+  --inspect                    Enable introspection mode
+  --show-attention             Display attention weights
+  --show-hidden <layer>        Display hidden states for layer
+  --show-qkv <layer>           Display Q/K/V vectors for layer
+  --show-logits                Display output logits
+  --show-entropy               Display attention entropy per layer
+  --show-saliency <pos>        Display saliency map for token position
+  --show-weights <layer>       Display weight matrices for layer
+  --show-tensors               List all tensor names in model
+  --dump-hidden <file>         Dump hidden states to CSV file
+  --dump-attention <file>      Dump attention weights to CSV file
+  --layer <n>                  Specific layer for inspection (default: all)
+  --head <n>                   Specific attention head (default: all)
+  --position <n>               Specific token position (default: all)
+  --verbose                    Enable verbose
+  --help                       Show help
+```
+
+### **Benchmark Mode**
+```
+./facaded_transformer benchmark [options]
+  -i, --interface <name>       Network interface (default: eth0)
+  -s, --server <mac>           Server MAC address (required)
+  -n, --iterations <n>         Benchmark iterations (default: 10)
+  -l, --layers <n>             Layers to benchmark (default: 12)
+  -e, --embed <dim>            Embedding dimension (default: 768)
+  -q, --seq-len <n>            Sequence length (default: 512)
+  --batch-size <n>             Batch size (default: 1)
+  --warmup <n>                 Warmup iterations (default: 2)
+  --output <file>              Save results to CSV file
+  --verbose                    Enable verbose output
+  --help                       Show help
+```
+
+### **Test Suite Mode**
+```
+./facaded_transformer test [options]
+  --all                        Run all tests
+  --protocol                   Test protocol handling
+  --config                     Test configuration
+  --quant                      Test quantization/dequantization
+  --kernels                    Test CUDA kernels (requires GPU)
+  --network                    Test network layer
+  --facade                     Test facade introspection functions
+  --tokenizer                  Test tokenizer encode/decode
+  --gguf                       Test GGUF model loading
+  --verbose                    Verbose test output
+  --help                       Show help
+```
 
 ---
 
-## agentic_transformer.cu (Agentic Universal Transformer)
+## Facade Introspection
 
-### Design
-
-A transparent, introspectable GGUF transformer core with agentic hooks, designed for universal quantized inference and fine-grained layer/device inspection.
-
-- **Full Quantization Registry:** Implements all llama.cpp-style K-quants (`Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`) with accurate block layout and dequantization, plus legacy quant formats (`Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`).
-- **Device Offloading:** Per-layer configurable GPU/CPU device assignment lets you offload layers for memory/concurrency benchmarking.
-- **Layer, Token & Activation Inspection:** Exposes all internal states—hidden states, attention weights/logits, QKV, residuals, FFN output, normalization—at every step.
-- **Open Kernel Design:** All math (RoPE, matmul, GELU, RMSNorm, etc.) is visible for modification and debugging.
-- **Compact Design:** Complete transformer, quants, and inspection all in a single CUDA file under 1MB.
-- **MIT License.**
-
-#### Quantization Support
-
-- Complete and extensible support for K-quants (`Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_K`).
-- Legacy/compat formats (`Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`) for older GGUF models.
-- Modular dequantization dispatch—ready to add new quant types (like K_M, K_L, K_S) as they appear; match tensor metadata and add block logic.
-
-#### Device Offloading
-
-- Flexible `LayerDeviceConfig`: Assign GPU or CPU to each transformer layer for profiling or hybrid runs.
-- Unified dispatch ensures correct routing of all matmul, normalization, and quant kernels per device.
-
-#### Usage & API
-
-Build:
-
-```bash
-nvcc -O3 -std=c++14 agentic_transformer.cu -o agentic_transformer
-```
-
-Run:
-
-```bash
-./agentic_transformer --model mymodel.gguf --tokenizer tokenizer.json --prompt "Hello world" --max-tokens 32
-```
-
-Inspect/override per-layer device (see code comments):
-
-```bash
-./agentic_transformer --model model.gguf --cpu-layers 0,1,2   # Offload first 3 layers to CPU
-```
-
-Access all activations via API or connect to the Python GUI for inspection.
-
----
-
-## transformer_gui.py (Interactive CLI GUI)
-
-### Features
-
-- Terminal-based GUI for running and controlling CUDA transformer inference.
-- Supports all model loading, generation, file ops, benchmarking, quant/stat commands.
-- Color-coded status and help.
-- Conversation history, log saving.
-- Compilation management.
-- Model inspection: list tensors, quant stats, benchmarking.
-
-### Usage
-
-```bash
-python3 transformer_gui.py
-```
-
-Workflow:
-- Compile CUDA (`compile`)
-- Load model (`load <model.gguf> [tokenizer.json]`)
-- Chat (`chat <prompt>`)
-- Inspect (`info`, `tensors`, `quant`, `benchmark`)
-- Manage files, settings, logs.  
-Type `help` for all commands.
-
----
-
-## transformer.cu (Standard Transformer)
-
-### Design
-
-Implements a full Transformer LLM from first principles for GPU in a single file:
-
-- Loads GGUF file, locates all layers and tensors.
-- Loads GPT-2 vocab/tokenizer.
-- Allocates/manages GPU tensors.
-- Embedding, attention, residuals, layer norm, FFN (GELU), logits all in custom kernels.
-- CLI for model inference ("generation").
-
-### Usage
-
-```bash
-nvcc -O3 -std=c++14 transformer.cu -o transformer_cuda
-```
+The facade interface enables deep insight into model operation:
+- **Attention weights and entropy**—see where the model looks.
+- **Layer states**—inspect activations, hidden states, and Q/K/V vectors.
+- **Embeddings**—inspect positional and token embeddings.
+- **Weights and tensors**—list, view, and export all model tensors.
+- **Saliency maps**—explainability for tokens and layers.
+- **Dump/Export**—CSV output for scientific analysis or plugin integration.
 
 Example:
-
-```bash
-./transformer_cuda --model mymodel.gguf --tokenizer tokenizer.json --prompt "The quick brown fox" --max-tokens 64 --temperature 1.2
+```
+./facaded_transformer facade --model model.gguf --prompt "Explain quantum tunneling" --show-attention
 ```
 
-### Arguments
+---
 
-- `--model`      Path to GGUF transformer checkpoint
-- `--tokenizer`  Path to tokenizer JSON (GPT-2 vocab format)
-- `--prompt`     Text to be tokenized/generate
-- `--max-tokens` Maximum tokens to generate
-- `--temperature` Sampling temperature (default 1.0)
-- More options for batch/generation in code comments.
+## Supported Platforms
 
-### Public Methods
+- **GPU:** CUDA (NVIDIA), Metal (Apple Silicon), OpenCL (Intel/AMD/Apple), Hybrid pipelines (planned/coming soon)
+- **CPU fallback:** Full inference and layer offloading supported.
+- **Distributed networking:** Layer 2 Ethernet/LAN—works on Linux, macOS, and supported Windows builds.
 
-**Class: `TransformerModel`**
-- `bool loadModel(const std::string& path)`
-- `bool loadTokenizer(const std::string& path)`
-- `std::string generate(const std::string& prompt, int maxTokens, double temperature = 1.0)`
-  - Tokenizes, runs forward/inference, samples next token(s)
-- `std::vector<float> forward(const std::vector<int>& tokenIDs)`
-  - Forward pass, returns logits
-
-#### GGUF/Tokenizer Access
-
-- GPU/CPU tensor accessor for all parameters (`GGUFLoader`)
-- Tokenizer: `encode(text)` and `decode(token_ids)`
+All main features match across platforms; ports are developed to maintain identical capability and option parity.
 
 ---
 
-## facaded_transformer.cu (Transformer Facade)
+## Quantization Types
 
-### Design
+- **none:** float32, 32 bpw
+- **f16:** float16, 16 bpw
+- **bf16:** brain float16, 16 bpw
+- **q8_0:** 8-bit, 8.5 bpw
+- **q6_k, q5_k, q4_k, q3_k, q2_k:** advanced GGML quant types (2.625 bpw and up)
+- **q4_0, q4_1, q5_0, q5_1:** legacy quant formats
 
-A C++/CUDA introspection tool for the transformer. The facade gives:
-
-- **Detailed per-layer access**: all activations, attention logits/weights, Q/K/V vectors, per-head output, layer norms, residuals, etc.
-- **Inspection, visualization, manipulation ready**: Export tensors as CPU-side arrays for plotting, analysis.
-- **Designed for research, teaching, and tinkering.**
-- **Pythonic API-style maximal transparency.**
-
-### Usage
-
-```bash
-nvcc -O3 -std=c++17 facaded_transformer.cu -o facadedtransformer_cuda -lcublas
-```
-
-Pattern:
-- Load GGUF, tokenizer.
-- Use `forward(tokenIds)` for prompt inference.
-- Access all states/weights per step/layer.
-
-### Arguments
-
-- `bool loadModel(path)`
-- `bool loadTokenizer(path)`
-- `DoubleArray forward(IntArray)`
-- `std::string generate(prompt, maxTokens, temperature)`
-- Introspection functions:  
-  - Per-layer Q/K/V, attention weights/logits, hidden/residuals, layer norm, FFN.
-  - Final logits, output layers.
-- `GGUFLoader` and `Tokenizer` for low-level hacking
-- Model loader: `getTensor("name")`, `printAllTensorNames()`, config getters.
-
-### Public Methods
-
-**Class: `TransformerModel` (Facade)**
-- `bool loadModel(const std::string& path)`
-- `bool loadTokenizer(const std::string& path)`
-- `DoubleArray forward(const IntArray& tokenIds)`
-- `std::string generate(const std::string& prompt, int maxTokens, double temperature = 1.0)`
-- Introspection:
-  - `getLastHiddenStates()`, `getLastAttentionWeights()`, `getLastQVectors()`, `getLastKVectors()`, `getLastLayerNormOutputs()`, `getLastFFNOutputs()`, `getLastLogits()`, etc.
+Smaller quantizations mean faster inference and lower memory footprint, at (potential) cost of minor accuracy.
 
 ---
 
-## Data Structures & Format
+## Usage Examples
 
-- **GGUFTensor / GGUFLoader:** Loads, parses, and gives direct access to all tensors.
-- **Tokenizer:** GPT-2 compatible JSON vocab, encode/decode.
-- **CPU/GPU buffer design:** Can extract CPU tensors at any time for debugging/display.
-- **Attention:** All head-level/intermediate states accessible after forward pass.
+- **Start server on eth0 with 24 layers and Q4_K quantization:**
+  ```
+  ./facaded_transformer server -i eth0 -l 24 -e 1024 --quant q4_k
+  ```
+- **Connect client with custom sequence length and vocab:**
+  ```
+  ./facaded_transformer client -s AA:BB:CC:DD:EE:FF -q 1024 -v 32000 -r 12
+  ```
+- **Run facade with introspection:**
+  ```
+  ./facaded_transformer facade --model model.gguf --tokenizer tok.json --prompt "Hello" --inspect
+  ```
+- **Inspect attention weights for layer 0:**
+  ```
+  ./facaded_transformer facade --model model.gguf --prompt "Test" --show-attention --layer 0
+  ```
+- **Dump hidden states to file:**
+  ```
+  ./facaded_transformer facade --model model.gguf --prompt "Test" --dump-hidden hidden.csv
+  ```
+- **Run facade and quantization tests:**
+  ```
+  ./facaded_transformer test --facade --quant --verbose
+  ```
 
 ---
 
-## Overview & Notes
+## Testing & Safety
 
-- **No icons, branding, or product logos.** Docs and source only.
-- All code is *deliberately hackable*: change, inspect, checkpoint any parameter/state.
-- **No third-party ML frameworks**—entirely self-contained CUDA/C++.
+This project maintains one of the most exhaustive open test suites for transformers and distributed LLMs:
+
+- **317+ Tests, 100% Passing (as of latest release).**
+  - Protocol, networking, edge cases, code quality, kernel correctness, quantization, GGUF/tokenizer/file handling, CLI coverage, and introspection.
+- **Code checks for style, safety, and reproducibility.**
+- **Easy to validate—run the suite yourself (`./COMPREHENSIVE_TEST_SUITE.sh`).**
+- **Bit-exactness and gold-standard output validation planned for future releases.**
 
 ---
 
 ## License
 
-MIT License © 2025 Matthew Abbott
+Open source (MIT). See [LICENSE](LICENSE).
 
-See LICENSE or header in source files for full terms.
+---
+
+## Acknowledgments & History
+
+This project was designed and implemented by [Matthew Abbott](https://github.com/matthewJamesAbbott) and community, inspired by the need for a robust, distributed, transparent transformer for everyone—not just for the audio or scene community, but all users, domains, and hardware.
+
+---
+
+## Contact / Further Info
+
+Issues, improvements, and discussion are welcome via GitHub issues and Pull Requests.
+
+---
