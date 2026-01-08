@@ -22,21 +22,6 @@
  * SOFTWARE.
  */
 
-/*
- * MIT License - Distributed Transformer with CUDA Integration
- * 
- * Copyright (c) 2025 Matthew Abbott
- * 
- * MERGED INTEGRATION:
- * - Protocol.h (message types, structures, utilities)
- * - TransformerNetwork.h/cpp (client/server layer abstractions)
- * - DistributedTransformer.h/cpp (high-level orchestration)
- * - transformer.cu (CUDA kernels, layer execution)
- * 
- * Single file, fully operational, zero stubs/placeholders
- * Layer 2 Ethernet distributed execution with real CUDA kernels
- */
-
 #include <iostream>
 #include <fstream>
 #include <sstream>
