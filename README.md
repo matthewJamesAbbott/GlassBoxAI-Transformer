@@ -34,7 +34,7 @@ It uses **Layer 2 Ethernet** for high-performance local-area orchestration, supp
 - **Distributed:** Delegate work across machines, devices, and network interfaces—no cloud or vendor lock-in.
 - **Cross-platform:** CUDA, Metal, OpenCL, and CPU, all supported (per build); extensible to other backends.
 - **Introspectable:** See activations, QKV projections, attention, logits, and more in real time.
-- **Reproducible:** 317+ comprehensive tests, all passing—verify yourself.
+- **Reproducible:** 372 comprehensive tests, all passing—verify yourself.
 - **Quantized:** Supports a wide array of quant formats for fast, efficient inference.
 
 ---
