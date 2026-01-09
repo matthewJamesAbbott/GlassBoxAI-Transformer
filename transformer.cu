@@ -764,8 +764,11 @@ static int createRawSocket(const std::string& ifName) {
 
 // sendRawFrame uses sendto to transmit Ethernet frames
 static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
-                         const std::vector<uint8_t>& payload) {
-    if (s < 0) return false;
+                         const std::vector<uint8_t>& payload, const std::string& ifName = "") {
+    if (s < 0) {
+        std::cerr << "sendRawFrame: socket is invalid" << std::endl;
+        return false;
+    }
 
     std::vector<uint8_t> frame(14 + payload.size());
     memcpy(&frame[0], destMAC, 6);
@@ -776,48 +779,430 @@ static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
 
     struct sockaddr_ll addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sll_ifindex = 0;
-    addr.sll_halen = 6;
-    memcpy(addr.sll_addr, destMAC, 6);
+    addr.sll_family = AF_PACKET;
+    addr.sll_protocol = htons(DTX_ETHERTYPE);
 
-    return sendto(s, frame.data(), frame.size(), 0,
-                  (struct sockaddr*)&addr, sizeof(addr)) == (ssize_t)frame.size();
-}
+    // Get interface index from name
+    if (!ifName.empty()) {
+        addr.sll_ifindex = if_nametoindex(ifName.c_str());
+        if (addr.sll_ifindex == 0) {
+            std::cerr << "Error: Cannot get index for interface " << ifName << std::endl;
+            return false;
+        }
+    } else {
+        addr.sll_ifindex = 1; // loopback as fallback
+    }
 
-// receiveRawFrame uses recvfrom to receive Ethernet frames
-// Uses select with FD_SET for timeout, with tv_sec and tv_usec
-static bool receiveRawFrame(int s, EthernetFrame& frame, int timeoutMs) {
-    if (s < 0) return false;
+    addr.sll_halen = ETH_ALEN;
+    memcpy(addr.sll_addr, destMAC, ETH_ALEN);
 
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(s, &fds);
-
-    struct timeval tv;
-    tv.tv_sec = timeoutMs / 1000;
-    tv.tv_usec = (timeoutMs % 1000) * 1000;
-
-    int ret = select(s + 1, &fds, nullptr, nullptr, &tv);
-    if (ret <= 0) return false;
-
-    std::vector<uint8_t> buffer(2048);
-    struct sockaddr_ll srcAddr;
-    socklen_t addrLen = sizeof(srcAddr);
-
-    ssize_t recvLen = recvfrom(s, buffer.data(), buffer.size(), 0,
-                               (struct sockaddr*)&srcAddr, &addrLen);
-    if (recvLen < 14) return false;
-
-    memcpy(frame.destMAC, &buffer[0], 6);
-    memcpy(frame.srcMAC, &buffer[6], 6);
-    memcpy(&frame.etherType, &buffer[12], 2);
-    frame.etherType = ntohs(frame.etherType);
-
-    frame.payload.assign(&buffer[14], &buffer[14] + recvLen - 14);
+    ssize_t sent = sendto(s, frame.data(), frame.size(), 0,
+                          (struct sockaddr*)&addr, sizeof(addr));
+    if (sent != (ssize_t)frame.size()) {
+        std::cerr << "sendto failed: sent " << sent << " bytes, expected " << frame.size() << std::endl;
+        return false;
+    }
     return true;
-}
+                         }
+
+                         // receiveRawFrame uses recvfrom to receive Ethernet frames
+                         // Uses select with FD_SET for timeout, with tv_sec and tv_usec
+                         static bool receiveRawFrame(int s, EthernetFrame& frame, int timeoutMs) {
+                             if (s < 0) return false;
+
+                             fd_set fds;
+                             FD_ZERO(&fds);
+                             FD_SET(s, &fds);
+
+                             struct timeval tv;
+                             tv.tv_sec = timeoutMs / 1000;
+                             tv.tv_usec = (timeoutMs % 1000) * 1000;
+
+                             int ret = select(s + 1, &fds, nullptr, nullptr, &tv);
+                             if (ret <= 0) return false;
+
+                             std::vector<uint8_t> buffer(2048);
+                             struct sockaddr_ll srcAddr;
+                             socklen_t addrLen = sizeof(srcAddr);
+
+                             ssize_t recvLen = recvfrom(s, buffer.data(), buffer.size(), 0,
+                                                        (struct sockaddr*)&srcAddr, &addrLen);
+                             if (recvLen < 14) return false;
+
+                             memcpy(frame.destMAC, &buffer[0], 6);
+                             memcpy(frame.srcMAC, &buffer[6], 6);
+                             memcpy(&frame.etherType, &buffer[12], 2);
+                             frame.etherType = ntohs(frame.etherType);
+
+                             frame.payload.assign(&buffer[14], &buffer[14] + recvLen - 14);
+                             return true;
+                         }
 
 // ==================== TransformerServer ====================
+
+// ==================== GGUF Support Structures ====================
+
+struct GGUFTensor {
+    std::string name;
+    int numDims;
+    std::vector<int64_t> shape;
+    int dtype;
+    int64_t dataOffset;
+    bool dataLoaded;
+    std::vector<float> data;
+    std::vector<uint8_t> rawData;
+};
+
+typedef std::vector<float> SingleArray;
+typedef std::vector<int64_t> Int64Array;
+
+// ==================== Type Definitions ====================
+
+using IntArray = std::vector<int>;
+
+// ==================== Tokenizer ====================
+
+class Tokenizer {
+private:
+    std::map<std::string, int> tokenToId;
+    std::vector<std::string> idToToken;
+    int vocabSize;
+    bool loaded;
+
+public:
+    Tokenizer() : vocabSize(0), loaded(false) {}
+    
+    bool loadFromGGUF(const std::vector<std::string>& tokens, const std::vector<std::string>& merges) {
+        if (tokens.empty()) {
+            std::cerr << "No tokens provided from GGUF" << std::endl;
+            return false;
+        }
+        
+        idToToken = tokens;
+        vocabSize = tokens.size();
+        
+        for (int i = 0; i < (int)tokens.size(); i++) {
+            tokenToId[tokens[i]] = i;
+        }
+        
+        loaded = vocabSize > 0;
+        if (loaded)
+            std::cout << "Tokenizer loaded from GGUF: " << vocabSize << " tokens" << std::endl;
+        
+        return loaded;
+    }
+    
+    bool loadFromFile(const std::string& filename) {
+        std::ifstream file(filename);
+        if (!file.is_open()) return false;
+        
+        std::string content((std::istreambuf_iterator<char>(file)),
+                             std::istreambuf_iterator<char>());
+        file.close();
+        
+        size_t vocabStart = content.find("\"vocab\"");
+        if (vocabStart == std::string::npos) return false;
+        
+        vocabStart = content.find("{", vocabStart);  // } balance brace for naive test
+        if (vocabStart == std::string::npos) return false;
+        
+        int braceCount = 1;
+        size_t vocabEnd = vocabStart + 1;
+        bool inString = false;
+        bool escaped = false;
+        
+        while (vocabEnd < content.length() && braceCount > 0) {
+            char c = content[vocabEnd];
+            if (escaped) { escaped = false; }
+            else if (c == '\\' && inString) { escaped = true; }
+            else if (c == '"') { inString = !inString; }
+            else if (!inString) {
+                if (c == '{') braceCount++;
+                else if (c == '}') braceCount--;
+            }
+            vocabEnd++;
+        }
+        
+        size_t pos = vocabStart + 1;
+        size_t endPos = vocabEnd - 1;
+        
+        while (pos < endPos) {
+            while (pos < endPos && (content[pos] == ' ' || content[pos] == '\n' || 
+                   content[pos] == '\r' || content[pos] == '\t' || content[pos] == ',')) {
+                pos++;
+            }
+            if (pos >= endPos) break;
+            
+            if (content[pos] != '"') { pos++; continue; }
+            pos++;
+            
+            std::string token;
+            while (pos < endPos) {
+                char c = content[pos];
+                if (c == '\\' && pos + 1 < endPos) {
+                    char next = content[pos + 1];
+                    if (next == 'n') { token += '\n'; pos += 2; }
+                    else if (next == 'r') { token += '\r'; pos += 2; }
+                    else if (next == 't') { token += '\t'; pos += 2; }
+                    else if (next == '"') { token += '"'; pos += 2; }
+                    else if (next == '\\') { token += '\\'; pos += 2; }
+                    else { token += c; pos++; }
+                } else if (c == '"') { pos++; break; }
+                else { token += c; pos++; }
+            }
+            
+            while (pos < endPos && (content[pos] == ' ' || content[pos] == ':' ||
+                   content[pos] == '\n' || content[pos] == '\r' || content[pos] == '\t')) {
+                pos++;
+            }
+            
+            size_t numStart = pos;
+            while (pos < endPos && (isdigit(content[pos]) || content[pos] == '-')) {
+                pos++;
+            }
+            
+            if (pos > numStart) {
+                try {
+                    int id = std::stoi(content.substr(numStart, pos - numStart));
+                    tokenToId[token] = id;
+                    if (id >= (int)idToToken.size()) idToToken.resize(id + 1);
+                    idToToken[id] = token;
+                    if (id >= vocabSize) vocabSize = id + 1;
+                } catch (...) {}
+            }
+        }
+        
+        loaded = vocabSize > 0;
+        return loaded;
+    }
+    
+    IntArray encode(const std::string& text) {
+        IntArray result;
+        if (!loaded) return result;
+        
+        std::string currentWord;
+        for (size_t i = 0; i < text.length(); i++) {
+            if (text[i] == ' ') {
+                if (!currentWord.empty()) {
+                    int id = getTokenId(currentWord);
+                    if (id >= 0) result.push_back(id);
+                    else for (char c : currentWord) {
+                        id = getTokenId(std::string(1, c));
+                        if (id >= 0) result.push_back(id);
+                    }
+                }
+                currentWord = "\xC4\xA0";
+            } else {
+                currentWord += text[i];
+            }
+        }
+        if (!currentWord.empty()) {
+            int id = getTokenId(currentWord);
+            if (id >= 0) result.push_back(id);
+            else for (char c : currentWord) {
+                id = getTokenId(std::string(1, c));
+                if (id >= 0) result.push_back(id);
+            }
+        }
+        return result;
+    }
+    
+    std::string decode(const IntArray& ids) {
+        std::string result;
+        for (int id : ids) {
+            std::string token = getToken(id);
+            size_t pos;
+            while ((pos = token.find("\xC4\xA0")) != std::string::npos) {
+                token.replace(pos, 2, " ");
+            }
+            while ((pos = token.find("\xC4\x8A")) != std::string::npos) {
+                token.replace(pos, 2, "\n");
+            }
+            result += token;
+        }
+        return result;
+    }
+    
+    int getTokenId(const std::string& token) {
+        auto it = tokenToId.find(token);
+        return (it != tokenToId.end()) ? it->second : -1;
+    }
+    
+    std::string getToken(int id) {
+        return (id >= 0 && id < (int)idToToken.size()) ? idToToken[id] : "";
+    }
+    
+    int getVocabSize() const { return vocabSize; }
+    bool isLoaded() const { return loaded; }
+};
+
+// ==================== GGUFLoader ====================
+
+class GGUFLoader {
+private:
+    std::ifstream stream;
+    std::string filename;
+    std::vector<GGUFTensor> tensors;
+    std::map<std::string, int> tensorMap;
+    int64_t tensorDataStart;
+    
+    int embedDim, numLayers, numHeads, ffnDim, vocabSize, maxSeqLen;
+    bool loaded;
+    
+    // Embedded tokenizer from GGUF
+    std::vector<std::string> ggufTokens;
+    std::vector<std::string> ggufMerges;
+
+    uint32_t readUInt32() {
+        uint32_t val;
+        stream.read(reinterpret_cast<char*>(&val), 4);
+        return val;
+    }
+    
+    uint64_t readUInt64() {
+        uint64_t val;
+        stream.read(reinterpret_cast<char*>(&val), 8);
+        return val;
+    }
+    
+    std::string readString() {
+        uint64_t len = readUInt64();
+        if (len > 10000000) return "";
+        std::string str(len, '\0');
+        stream.read(&str[0], len);
+        return str;
+    }
+    
+    void skipMetadataValue(int valueType) {
+        switch (valueType) {
+            case 0: case 1: stream.seekg(1, std::ios::cur); break;
+            case 2: case 3: stream.seekg(2, std::ios::cur); break;
+            case 4: case 5: case 6: stream.seekg(4, std::ios::cur); break;
+            case 7: stream.seekg(1, std::ios::cur); break;
+            case 8: {
+                uint64_t len = readUInt64();
+                stream.seekg(len, std::ios::cur);
+            } break;
+            case 9: {
+                uint32_t arrType = readUInt32();
+                uint64_t arrCount = readUInt64();
+                for (uint64_t i = 0; i < std::min(arrCount, (uint64_t)999999); i++)
+                    skipMetadataValue(arrType);
+            } break;
+            case 10: case 11: case 12: stream.seekg(8, std::ios::cur); break;
+        }
+    }
+
+    void parseHeader() {
+        char magic[4];
+        stream.read(magic, 4);
+        if (strncmp(magic, "GGUF", 4) != 0)
+            throw std::runtime_error("Invalid GGUF magic");
+        
+        uint32_t version = readUInt32();
+        (void)version;
+        uint64_t tensorCount = readUInt64();
+        uint64_t metadataCount = readUInt64();
+        
+        for (uint64_t i = 0; i < metadataCount; i++) {
+            std::string key = readString();
+            uint32_t valueType = readUInt32();
+            
+            if ((key.find("embedding_length") != std::string::npos) && 
+                (valueType == 4 || valueType == 5 || valueType == 10)) {
+                embedDim = (valueType == 10) ? readUInt64() : readUInt32();
+            } else if ((key.find("block_count") != std::string::npos) && 
+                       (valueType == 4 || valueType == 5 || valueType == 10)) {
+                numLayers = (valueType == 10) ? readUInt64() : readUInt32();
+            } else if ((key.find("head_count") != std::string::npos) && 
+                       (valueType == 4 || valueType == 5 || valueType == 10)) {
+                numHeads = (valueType == 10) ? readUInt64() : readUInt32();
+            } else if ((key.find("feed_forward") != std::string::npos) && 
+                       (valueType == 4 || valueType == 5 || valueType == 10)) {
+                ffnDim = (valueType == 10) ? readUInt64() : readUInt32();
+            } else if ((key.find("context_length") != std::string::npos) && 
+                       (valueType == 4 || valueType == 5 || valueType == 10)) {
+                maxSeqLen = (valueType == 10) ? readUInt64() : readUInt32();
+            }
+            // Tokenizer data from GGUF
+            else if (key == "tokenizer.ggml.tokens" && valueType == 9) {
+                uint32_t arrType = readUInt32();
+                uint64_t arrCount = readUInt64();
+                if (arrType == 8) {
+                    ggufTokens.resize(arrCount);
+                    for (uint64_t j = 0; j < arrCount; j++) {
+                        ggufTokens[j] = readString();
+                    }
+                    std::cout << "Loaded " << arrCount << " tokens from GGUF" << std::endl;
+                } else {
+                    for (uint64_t j = 0; j < arrCount; j++) skipMetadataValue(arrType);
+                }
+            } else if (key == "tokenizer.ggml.merges" && valueType == 9) {
+                uint32_t arrType = readUInt32();
+                uint64_t arrCount = readUInt64();
+                if (arrType == 8) {
+                    ggufMerges.resize(arrCount);
+                    for (uint64_t j = 0; j < arrCount; j++) {
+                        ggufMerges[j] = readString();
+                    }
+                    std::cout << "Loaded " << arrCount << " merges from GGUF" << std::endl;
+                } else {
+                    for (uint64_t j = 0; j < arrCount; j++) skipMetadataValue(arrType);
+                }
+            } else {
+                skipMetadataValue(valueType);
+            }
+        }
+        
+        tensors.resize(tensorCount);
+        for (uint64_t i = 0; i < tensorCount; i++) {
+            tensors[i].name = readString();
+            tensors[i].numDims = readUInt32();
+            tensors[i].shape.resize(tensors[i].numDims);
+            for (int d = 0; d < tensors[i].numDims; d++)
+                stream.read(reinterpret_cast<char*>(&tensors[i].shape[d]), 8);
+            tensors[i].dtype = readUInt32();
+            tensors[i].dataOffset = readUInt64();
+            tensors[i].dataLoaded = false;
+            tensorMap[tensors[i].name] = i;
+        }
+        
+        tensorDataStart = stream.tellg();
+        while (tensorDataStart % 32 != 0) tensorDataStart++;
+    }
+
+public:
+    GGUFLoader() : embedDim(768), numLayers(12), numHeads(12), ffnDim(3072),
+                   vocabSize(50257), maxSeqLen(1024), loaded(false) {}
+    
+    bool loadFromFile(const std::string& fname) {
+        filename = fname;
+        stream.open(filename, std::ios::binary);
+        if (!stream.is_open()) return false;
+        
+        try {
+            parseHeader();
+            loaded = true;
+        } catch (...) {
+            return false;
+        }
+        return true;
+    }
+    
+    int getEmbedDim() const { return embedDim; }
+    int getNumLayers() const { return numLayers; }
+    int getNumHeads() const { return numHeads; }
+    int getFFNDim() const { return ffnDim; }
+    int getVocabSize() const { return vocabSize; }
+    int getMaxSeqLen() const { return maxSeqLen; }
+    bool isLoaded() const { return loaded; }
+    
+    // Embedded tokenizer access
+    bool hasTokenizer() const { return !ggufTokens.empty(); }
+    const std::vector<std::string>& getTokens() const { return ggufTokens; }
+    const std::vector<std::string>& getMerges() const { return ggufMerges; }
+};
+
 
 class TransformerServer {
 public:
@@ -2060,6 +2445,11 @@ int main(int argc, char* argv[]) {
         std::cout << "Verbose: " << (verbose ? "yes" : "no") << std::endl;
         std::cout << "============================\n" << std::endl;
 
+        // For server: all layers are remote, execute from layer 0
+        cfg.localLayers = 0;
+        cfg.remoteLayers = cfg.totalLayers;
+        cfg.startRemoteLayer = 0;
+
         DistTransformer::DistributedTransformerServer server(cfg);
         if (!server.initialize()) {
             std::cerr << "Failed to initialize server" << std::endl;
@@ -2071,11 +2461,11 @@ int main(int argc, char* argv[]) {
         });
 
         std::cout << "Server ready. Processing up to " << maxMessages << " messages...\n" << std::endl;
-        server.run(maxMessages);
-        std::cout << "Server shutdown complete." << std::endl;
-        return 0;
+         server.run(maxMessages);
+         std::cout << "Server shutdown complete." << std::endl;
+         return 0;
 
-    } else if (command == "client") {
+        } else if (command == "client") {
         // Parse client arguments
         DistTransformer::DistributedConfig cfg;
         cfg.totalLayers = 12;
@@ -2439,4 +2829,3 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
-
