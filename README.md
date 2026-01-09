@@ -1,8 +1,3 @@
-A NOTE TO ALL THAT SEE THIS. I AM WORKING ON THIS ITS CLOSE BUT NOT PERFECT THANX FOR YOUR PATIENCE AND FOR BELIEVING IN MY WORK.
-
-
-
-
 # GlassBoxAI-Transformer
 
 **A distributed, introspectable, cross-platform transformer for everyone.**
