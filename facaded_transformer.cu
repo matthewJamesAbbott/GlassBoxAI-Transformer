@@ -727,7 +727,9 @@ std::vector<uint8_t> packTensorData(const std::vector<float>& data, int) {
 // ==================== Raw Socket Helpers ====================
 
 static int createRawSocket(const std::string& ifName) {
-    int s = socket(PF_PACKET, SOCK_RAW, htons(DTX_ETHERTYPE));
+    // Use ETH_P_ALL (0) to capture all Ethernet frames
+    // This allows us to filter by EtherType in the application layer
+    int s = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (s < 0) {
         std::cerr << "Error: Cannot create raw socket. Need root privileges." << std::endl;
         return -1;
@@ -748,10 +750,9 @@ static int createRawSocket(const std::string& ifName) {
     struct sockaddr_ll bindAddr;
     memset(&bindAddr, 0, sizeof(bindAddr));
     bindAddr.sll_family = AF_PACKET;
-    bindAddr.sll_protocol = htons(DTX_ETHERTYPE);
+    // Don't specify protocol in bind - we'll filter by EtherType in receiveRawFrame
+    bindAddr.sll_protocol = 0;
     bindAddr.sll_ifindex = ifIndex;
-    bindAddr.sll_hatype = 1;
-    bindAddr.sll_halen = 6;
 
     if (bind(s, (struct sockaddr*)&bindAddr, sizeof(bindAddr)) < 0) {
         std::cerr << "Error: Cannot bind socket to interface: " << ifName << std::endl;
@@ -764,8 +765,11 @@ static int createRawSocket(const std::string& ifName) {
 
 // sendRawFrame uses sendto to transmit Ethernet frames
 static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
-                         const std::vector<uint8_t>& payload) {
-    if (s < 0) return false;
+                         const std::vector<uint8_t>& payload, const std::string& ifName = "") {
+    if (s < 0) {
+        std::cerr << "sendRawFrame: socket is invalid" << std::endl;
+        return false;
+    }
 
     std::vector<uint8_t> frame(14 + payload.size());
     memcpy(&frame[0], destMAC, 6);
@@ -776,12 +780,30 @@ static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
 
     struct sockaddr_ll addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sll_ifindex = 0;
-    addr.sll_halen = 6;
-    memcpy(addr.sll_addr, destMAC, 6);
+    addr.sll_family = AF_PACKET;
+    addr.sll_protocol = 0; // Protocol doesn't matter for sending raw frames
+    
+    // Get interface index from name
+    if (!ifName.empty()) {
+        addr.sll_ifindex = if_nametoindex(ifName.c_str());
+        if (addr.sll_ifindex == 0) {
+            std::cerr << "Error: Cannot get index for interface " << ifName << std::endl;
+            return false;
+        }
+    } else {
+        addr.sll_ifindex = 1; // loopback as fallback
+    }
+    
+    addr.sll_halen = ETH_ALEN;
+    memcpy(addr.sll_addr, destMAC, ETH_ALEN);
 
-    return sendto(s, frame.data(), frame.size(), 0,
-                  (struct sockaddr*)&addr, sizeof(addr)) == (ssize_t)frame.size();
+    ssize_t sent = sendto(s, frame.data(), frame.size(), 0,
+                          (struct sockaddr*)&addr, sizeof(addr));
+    if (sent != (ssize_t)frame.size()) {
+        std::cerr << "sendto failed: sent " << sent << " bytes, expected " << frame.size() << std::endl;
+        return false;
+    }
+    return true;
 }
 
 // receiveRawFrame uses recvfrom to receive Ethernet frames
@@ -812,6 +834,11 @@ static bool receiveRawFrame(int s, EthernetFrame& frame, int timeoutMs) {
     memcpy(frame.srcMAC, &buffer[6], 6);
     memcpy(&frame.etherType, &buffer[12], 2);
     frame.etherType = ntohs(frame.etherType);
+
+    // Filter for our custom DTX EtherType
+    if (frame.etherType != DTX_ETHERTYPE) {
+        return false;
+    }
 
     frame.payload.assign(&buffer[14], &buffer[14] + recvLen - 14);
     return true;
@@ -1020,12 +1047,26 @@ void TransformerServer::handleHandshakeReq(const uint8_t* srcMAC, const DTXHeade
     HandshakeReq req;
     memcpy(&req, payload, sizeof(HandshakeReq));
 
-    ClientSession session;
-    session.clientId = req.clientId;
-    memcpy(session.clientMAC, srcMAC, 6);
-    session.config = req;
+    // Check if this client is already connected
+    auto it = std::find_if(connectedClients.begin(), connectedClients.end(),
+                          [&req](const ClientSession& s) { return s.clientId == req.clientId; });
+    
+    if (it != connectedClients.end()) {
+        // Client reconnecting - update MAC address
+        memcpy(it->clientMAC, srcMAC, 6);
+    } else {
+        // New client
+        if (connectedClients.size() >= (size_t)maxConcurrentClients) {
+            std::cerr << "[Server] Max concurrent clients reached" << std::endl;
+            return;
+        }
+        ClientSession session;
+        session.clientId = req.clientId;
+        memcpy(session.clientMAC, srcMAC, 6);
+        session.config = req;
+        connectedClients.push_back(session);
+    }
 
-    connectedClients.push_back(session);
     currentClientId = req.clientId;
 
     HandshakeAck ack;
@@ -1040,7 +1081,7 @@ void TransformerServer::handleHandshakeReq(const uint8_t* srcMAC, const DTXHeade
 
     char macStr[18];
     macToString(srcMAC, macStr, sizeof(macStr));
-    std::cout << "[Server] Client connected: " << macStr << std::endl;
+    std::cout << "[Server] Client connected: " << macStr << " (total clients: " << connectedClients.size() << ")" << std::endl;
 }
 
 void TransformerServer::handleLayerConfig(const uint8_t*, const DTXHeader& hdr, const uint8_t* payload) {
@@ -1147,7 +1188,7 @@ bool TransformerServer::sendFrame(const uint8_t* destMAC, const DTXHeader& hdr,
         memcpy(&framePayload[sizeof(DTXHeader)], payload, hdr.payloadLen);
     }
 
-    return sendRawFrame(rawSocket, destMAC, localMAC, framePayload);
+    return sendRawFrame(rawSocket, destMAC, localMAC, framePayload, interfaceName);
 }
 
 bool TransformerServer::receiveFrame(EthernetFrame& frame, int timeoutMs) {
@@ -1355,7 +1396,7 @@ bool TransformerClient::sendFrame(const DTXHeader& hdr, const uint8_t* payload) 
         memcpy(&framePayload[sizeof(DTXHeader)], payload, hdr.payloadLen);
     }
 
-    return sendRawFrame(rawSocket, serverMAC, localMAC, framePayload);
+    return sendRawFrame(rawSocket, serverMAC, localMAC, framePayload, interfaceName);
 }
 
 bool TransformerClient::receiveFrame(EthernetFrame& frame, int timeoutMs) {
@@ -1956,6 +1997,7 @@ struct GGUFTensor {
     int64_t dataOffset;
     bool dataLoaded;
     SingleArray data;
+    std::vector<uint8_t> rawData;  // Store raw quantized data
 };
 
 // ==================== Tokenizer ====================
@@ -1969,6 +2011,26 @@ private:
 
 public:
     Tokenizer() : vocabSize(0), loaded(false) {}
+    
+    bool loadFromGGUF(const std::vector<std::string>& tokens, const std::vector<std::string>& merges) {
+        if (tokens.empty()) {
+            std::cerr << "No tokens provided from GGUF" << std::endl;
+            return false;
+        }
+        
+        idToToken = tokens;
+        vocabSize = tokens.size();
+        
+        for (int i = 0; i < (int)tokens.size(); i++) {
+            tokenToId[tokens[i]] = i;
+        }
+        
+        loaded = vocabSize > 0;
+        if (loaded)
+            std::cout << "Tokenizer loaded from GGUF: " << vocabSize << " tokens" << std::endl;
+        
+        return loaded;
+    }
     
     bool loadFromFile(const std::string& filename) {
         std::ifstream file(filename);
@@ -2126,6 +2188,10 @@ private:
     
     int embedDim, numLayers, numHeads, ffnDim, vocabSize, maxSeqLen;
     bool loaded;
+    
+    // Embedded tokenizer from GGUF
+    std::vector<std::string> ggufTokens;
+    std::vector<std::string> ggufMerges;
 
     uint32_t readUInt32() {
         uint32_t val;
@@ -2197,6 +2263,32 @@ private:
             } else if ((key.find("context_length") != std::string::npos) && 
                        (valueType == 4 || valueType == 5 || valueType == 10)) {
                 maxSeqLen = (valueType == 10) ? readUInt64() : readUInt32();
+            }
+            // Tokenizer data from GGUF
+            else if (key == "tokenizer.ggml.tokens" && valueType == 9) {
+                uint32_t arrType = readUInt32();
+                uint64_t arrCount = readUInt64();
+                if (arrType == 8) {  // string array
+                    ggufTokens.resize(arrCount);
+                    for (uint64_t j = 0; j < arrCount; j++) {
+                        ggufTokens[j] = readString();
+                    }
+                    std::cout << "Loaded " << arrCount << " tokens from GGUF" << std::endl;
+                } else {
+                    for (uint64_t j = 0; j < arrCount; j++) skipMetadataValue(arrType);
+                }
+            } else if (key == "tokenizer.ggml.merges" && valueType == 9) {
+                uint32_t arrType = readUInt32();
+                uint64_t arrCount = readUInt64();
+                if (arrType == 8) {  // string array
+                    ggufMerges.resize(arrCount);
+                    for (uint64_t j = 0; j < arrCount; j++) {
+                        ggufMerges[j] = readString();
+                    }
+                    std::cout << "Loaded " << arrCount << " merges from GGUF" << std::endl;
+                } else {
+                    for (uint64_t j = 0; j < arrCount; j++) skipMetadataValue(arrType);
+                }
             } else {
                 skipMetadataValue(valueType);
             }
@@ -2227,16 +2319,44 @@ private:
         for (int d = 0; d < tensors[idx].numDims; d++)
             totalElements *= tensors[idx].shape[d];
         
-        tensors[idx].data.resize(totalElements);
         stream.seekg(tensorDataStart + tensors[idx].dataOffset);
         
         if (tensors[idx].dtype == 0) {
+            // F32
+            tensors[idx].data.resize(totalElements);
             stream.read(reinterpret_cast<char*>(tensors[idx].data.data()), totalElements * 4);
         } else if (tensors[idx].dtype == 1) {
+            // F16
+            tensors[idx].data.resize(totalElements);
             std::vector<uint16_t> fp16Data(totalElements);
             stream.read(reinterpret_cast<char*>(fp16Data.data()), totalElements * 2);
             for (int64_t i = 0; i < totalElements; i++)
                 tensors[idx].data[i] = fp16_to_fp32(fp16Data[i]);
+        } else if (tensors[idx].dtype >= 2 && tensors[idx].dtype <= 15) {
+            // Quantized format - load raw data for later dequantization
+            int64_t numBlocks = (totalElements + QK_K - 1) / QK_K;
+            int64_t bytesNeeded = 0;
+            
+            switch(tensors[idx].dtype) {
+                case 2:  bytesNeeded = (totalElements / 32) * (2 + 16); break;       // Q4_0
+                case 3:  bytesNeeded = (totalElements / 32) * (4 + 16); break;       // Q4_1
+                case 6:  bytesNeeded = (totalElements / 32) * (2 + 4 + 16); break;   // Q5_0
+                case 7:  bytesNeeded = (totalElements / 32) * (4 + 4 + 16); break;   // Q5_1
+                case 8:  bytesNeeded = (totalElements / 32) * (2 + 32); break;       // Q8_0
+                case 10: bytesNeeded = numBlocks * sizeof(block_q2_K); break;        // Q2_K
+                case 11: bytesNeeded = numBlocks * sizeof(block_q3_K); break;        // Q3_K
+                case 12: bytesNeeded = numBlocks * sizeof(block_q4_K); break;        // Q4_K
+                case 13: bytesNeeded = numBlocks * sizeof(block_q5_K); break;        // Q5_K
+                case 14: bytesNeeded = numBlocks * sizeof(block_q6_K); break;        // Q6_K
+                case 15: bytesNeeded = numBlocks * sizeof(block_q8_K); break;        // Q8_K
+                default: return false;
+            }
+            
+            tensors[idx].rawData.resize(bytesNeeded);
+            stream.read(reinterpret_cast<char*>(tensors[idx].rawData.data()), bytesNeeded);
+            // Don't dequantize here - will be done on demand in getTensor
+            tensors[idx].data.resize(totalElements);
+            std::fill(tensors[idx].data.begin(), tensors[idx].data.end(), 0.0f);
         } else {
             return false;
         }
@@ -2267,8 +2387,40 @@ public:
         for (const auto& name : names) {
             auto it = tensorMap.find(name);
             if (it != tensorMap.end()) {
-                if (loadTensorByIndex(it->second))
-                    return tensors[it->second].data;
+                int idx = it->second;
+                if (loadTensorByIndex(idx)) {
+                    GGUFTensor& tensor = tensors[idx];
+                    
+                    // If quantized, dequantize on GPU
+                    if (tensor.dtype >= 2 && tensor.dtype <= 15 && !tensor.rawData.empty()) {
+                        int64_t totalElements = 1;
+                        for (int d = 0; d < tensor.numDims; d++)
+                            totalElements *= tensor.shape[d];
+                        
+                        tensor.data.resize(totalElements);
+                        
+                        // Allocate GPU memory
+                        uint8_t* d_quantized = nullptr;
+                        float* d_output = nullptr;
+                        CUDA_CHECK(cudaMalloc(&d_quantized, tensor.rawData.size()));
+                        CUDA_CHECK(cudaMalloc(&d_output, totalElements * sizeof(float)));
+                        
+                        // Copy quantized data to GPU
+                        CUDA_CHECK(cudaMemcpy(d_quantized, tensor.rawData.data(), tensor.rawData.size(), cudaMemcpyHostToDevice));
+                        
+                        // Dequantize on GPU using appropriate kernel
+                        int blockSize = 256;
+                        int gridSize = (totalElements + blockSize - 1) / blockSize;
+                        
+                        // For now, fallback to CPU dequantization for all quantized types
+                        dequant_row(tensor.rawData.data(), tensor.data.data(), totalElements, 0, (GGML_DType)tensor.dtype);
+                        cudaFree(d_quantized);
+                        cudaFree(d_output);
+                        tensor.rawData.clear();
+                    }
+                    
+                    return tensor.data;
+                }
             }
         }
         return SingleArray();
@@ -2300,6 +2452,19 @@ public:
     int getMaxSeqLen() const { return maxSeqLen; }
     bool isLoaded() const { return loaded; }
     std::vector<GGUFTensor>& getTensors() { return tensors; }
+    
+    int getTensorDtype(const std::string& name) const {
+        auto it = tensorMap.find(name);
+        if (it != tensorMap.end() && it->second < (int)tensors.size()) {
+            return tensors[it->second].dtype;
+        }
+        return -1;
+    }
+    
+    // Embedded tokenizer access
+    bool hasTokenizer() const { return !ggufTokens.empty(); }
+    const std::vector<std::string>& getTokens() const { return ggufTokens; }
+    const std::vector<std::string>& getMerges() const { return ggufMerges; }
 };
 
 // ==================== TransformerFacade ====================
@@ -2344,7 +2509,20 @@ public:
         return true;
     }
     
-    bool loadTokenizer(const std::string& path) { return tokenizer.loadFromFile(path); }
+    bool loadTokenizer(const std::string& path) {
+        // Special case: "gguf" or empty means use embedded tokenizer from GGUF file
+        if (path == "gguf" || path == "GGUF" || path.empty()) {
+            if (loader.hasTokenizer()) {
+                return tokenizer.loadFromGGUF(loader.getTokens(), loader.getMerges());
+            } else if (!path.empty() && path != "gguf" && path != "GGUF") {
+                // Only error if an explicit path was provided
+                std::cerr << "Error: GGUF file does not contain embedded tokenizer" << std::endl;
+                return false;
+            }
+            return true;  // Empty path without tokenizer is OK
+        }
+        return tokenizer.loadFromFile(path);
+    }
     
     DoubleArray runForward(const IntArray& tokenIds);
     std::string generate(const std::string& prompt, int maxTokens, double temperature = 1.0);
@@ -2538,15 +2716,48 @@ DoubleArray TransformerFacade::runForward(const IntArray& tokenIds) {
     int seqLen = tokenIds.size();
     lastSeqLen = seqLen;
     
+    // Check if model is quantized - if so, abort (requires distributed inference with GPU kernels)
+    int dtype_emb = loader.getTensorDtype("token_embd.weight");
+    if (dtype_emb == -1) dtype_emb = loader.getTensorDtype("wte.weight");
+    
+    if (dtype_emb >= 2 && dtype_emb <= 15) {
+        std::cerr << "\nERROR: Quantized models not supported in facade CPU mode" << std::endl;
+        std::cerr << "This model uses quantization format (dtype=" << dtype_emb << ")" << std::endl;
+        std::cerr << "\nSOLUTION: Use distributed inference instead:" << std::endl;
+        std::cerr << "  sudo ./facaded_transformer server -i veth0 --model <model.gguf>" << std::endl;
+        std::cerr << "  ./facaded_transformer client -i veth1 -s <mac> --model <model.gguf> --tokenizer <tokenizer.json> --prompt <text>\n" << std::endl;
+        return DoubleArray();
+    }
+    
     SingleArray tokenEmb = loader.getTensor({"token_embd.weight", "wte.weight"});
     SingleArray posEmb = loader.getTensor({"position_embd.weight", "wpe.weight"});
+    
+    if (tokenEmb.empty()) {
+        std::cerr << "ERROR: Failed to load token embeddings" << std::endl;
+        return DoubleArray();
+    }
     
     // Embed tokens
     std::vector<float> hidden(seqLen * embedDim);
     for (int pos = 0; pos < seqLen; pos++) {
         int tokenId = tokenIds[pos];
+        if (tokenId < 0 || tokenId >= vocabSize) {
+            std::cerr << "ERROR: Invalid token ID: " << tokenId << " (vocab size: " << vocabSize << ")" << std::endl;
+            return DoubleArray();
+        }
+        
+        // Check bounds
+        int tokenEmbIdx = tokenId * embedDim;
+        if (tokenEmbIdx + embedDim > (int)tokenEmb.size()) {
+            std::cerr << "ERROR: Token embedding index out of bounds: " << tokenEmbIdx << " + " << embedDim << " > " << tokenEmb.size() << std::endl;
+            return DoubleArray();
+        }
+        
         for (int i = 0; i < embedDim; i++) {
-            hidden[pos * embedDim + i] = tokenEmb[tokenId * embedDim + i] + posEmb[pos * embedDim + i];
+            hidden[pos * embedDim + i] = tokenEmb[tokenEmbIdx + i];
+            if (!posEmb.empty() && pos * embedDim + i < (int)posEmb.size()) {
+                hidden[pos * embedDim + i] += posEmb[pos * embedDim + i];
+            }
         }
     }
     
@@ -2751,9 +2962,24 @@ std::string TransformerFacade::generate(const std::string& prompt, int maxTokens
     IntArray tokenIds = tokenizer.encode(prompt);
     if (tokenIds.empty()) return "";
     
+    std::string result = prompt;
+    
     for (int t = 0; t < maxTokens; t++) {
         DoubleArray logits = runForward(tokenIds);
         if (logits.empty()) break;
+        
+        // Debug: check logits validity
+        if (logits.size() != (size_t)vocabSize) {
+            std::cerr << "ERROR: logits size mismatch: " << logits.size() << " != " << vocabSize << std::endl;
+            break;
+        }
+        
+        // Check if logits are mostly zeros (uninititialized)
+        int zeroCount = 0;
+        for (double v : logits) if (v == 0.0) zeroCount++;
+        if (zeroCount > (int)(vocabSize * 0.99)) {
+            std::cerr << "WARNING: logits are mostly zeros (unintialized?)" << std::endl;
+        }
         
         int selectedId;
         if (temperature <= 0.01) {
@@ -2780,6 +3006,12 @@ std::string TransformerFacade::generate(const std::string& prompt, int maxTokens
                 cumProb += probs[i];
                 if (r <= cumProb) { selectedId = i; break; }
             }
+        }
+        
+        // Bounds check before accessing embedding
+        if (selectedId < 0 || selectedId >= vocabSize) {
+            std::cerr << "ERROR: Invalid selected ID: " << selectedId << std::endl;
+            break;
         }
         
         tokenIds.push_back(selectedId);
@@ -2972,6 +3204,7 @@ int main(int argc, char* argv[]) {
         cfg.totalLayers = 12;
         cfg.localLayers = 0;
         cfg.remoteLayers = 12;
+        cfg.startRemoteLayer = 0;  // Server executes all layers starting from 0
         cfg.embedDim = 768;
         cfg.ffnDim = 3072;
         cfg.numHeads = 12;
@@ -2985,11 +3218,16 @@ int main(int argc, char* argv[]) {
         int vocabSize = 50257;
         int maxSeqLen = 2048;
         std::string quantType = "none";
+        std::string modelPath = "";
+        std::string tokenizerPath = "";
         float ropeBase = 10000.0f;
         float ropeScale = 1.0f;
         float eps = 1e-5f;
         float dropout = 0.0f;
         bool verbose = false;
+        
+        GGUFLoader modelLoader;
+        Tokenizer tokenizer;
 
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];
@@ -3019,6 +3257,10 @@ int main(int argc, char* argv[]) {
             } else if ((arg == "-g" || arg == "--gpu") && i + 1 < argc) {
                 std::string gpuVal = toLowerCase(argv[++i]);
                 hasGPU = (gpuVal == "yes" || gpuVal == "true" || gpuVal == "1");
+            } else if (arg == "--model" && i + 1 < argc) {
+                modelPath = argv[++i];
+            } else if (arg == "--tokenizer" && i + 1 < argc) {
+                tokenizerPath = argv[++i];
             } else if (arg == "--quant" && i + 1 < argc) {
                 quantType = toLowerCase(argv[++i]);
             } else if (arg == "--rope-base" && i + 1 < argc) {
@@ -3036,6 +3278,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "Usage: " << argv[0] << " server [options]\n" << std::endl;
                 std::cout << "OPTIONS:" << std::endl;
                 std::cout << "  -i, --interface <name>   Network interface (default: eth0)" << std::endl;
+                std::cout << "  --model <path>           Load GGUF model file" << std::endl;
+                std::cout << "  --tokenizer <path>       Load tokenizer.json file" << std::endl;
                 std::cout << "  -l, --layers <n>         Total layers to serve (default: 12)" << std::endl;
                 std::cout << "  -e, --embed <dim>        Embedding dimension (default: 768)" << std::endl;
                 std::cout << "  -f, --ffn <dim>          FFN dimension (default: 3072)" << std::endl;
@@ -3075,6 +3319,54 @@ int main(int argc, char* argv[]) {
         std::cout << "GPU Available: " << (hasGPU ? "yes" : "no") << std::endl;
         std::cout << "Verbose: " << (verbose ? "yes" : "no") << std::endl;
         std::cout << "============================\n" << std::endl;
+
+        // Load model if provided
+        if (!modelPath.empty()) {
+            std::cout << "Loading GGUF model: " << modelPath << std::endl;
+            if (modelLoader.loadFromFile(modelPath)) {
+                cfg.embedDim = modelLoader.getEmbedDim();
+                cfg.totalLayers = modelLoader.getNumLayers();
+                cfg.remoteLayers = cfg.totalLayers;
+                cfg.numHeads = modelLoader.getNumHeads();
+                cfg.numKVHeads = modelLoader.getNumHeads();
+                cfg.ffnDim = modelLoader.getFFNDim();
+                vocabSize = modelLoader.getVocabSize();
+                maxSeqLen = modelLoader.getMaxSeqLen();
+                std::cout << "  Model loaded successfully" << std::endl;
+                std::cout << "  Layers: " << cfg.totalLayers << ", Embed: " << cfg.embedDim 
+                          << ", Heads: " << cfg.numHeads << ", FFN: " << cfg.ffnDim << std::endl;
+            } else {
+                std::cerr << "Failed to load model: " << modelPath << std::endl;
+                return 1;
+            }
+        }
+
+        // Load tokenizer (auto-load from GGUF if model is loaded and no explicit path)
+        if (!modelPath.empty()) {
+            if (tokenizerPath.empty()) {
+                // Try to load from embedded GGUF
+                std::cout << "Loading tokenizer from embedded GGUF..." << std::endl;
+                if (modelLoader.hasTokenizer()) {
+                    if (tokenizer.loadFromGGUF(modelLoader.getTokens(), modelLoader.getMerges())) {
+                        vocabSize = tokenizer.getVocabSize();
+                        std::cout << "  Tokenizer loaded from GGUF: " << vocabSize << " tokens" << std::endl;
+                    } else {
+                        std::cout << "  Warning: Could not load tokenizer from GGUF" << std::endl;
+                    }
+                } else {
+                    std::cout << "  Warning: GGUF file does not contain embedded tokenizer" << std::endl;
+                }
+            } else {
+                std::cout << "Loading tokenizer: " << tokenizerPath << std::endl;
+                if (tokenizer.loadFromFile(tokenizerPath)) {
+                    vocabSize = tokenizer.getVocabSize();
+                    std::cout << "  Tokenizer loaded: " << vocabSize << " tokens" << std::endl;
+                } else {
+                    std::cerr << "Failed to load tokenizer: " << tokenizerPath << std::endl;
+                    return 1;
+                }
+            }
+        }
 
         DistTransformer::DistributedTransformerServer server(cfg);
         if (!server.initialize()) {
@@ -3277,6 +3569,9 @@ int main(int argc, char* argv[]) {
         std::string interfaceName = "eth0";
         uint8_t serverMAC[6] = {0};
         int iterations = 10;
+        int batchSize = 1;
+        int warmupIters = 2;
+        std::string outputFile = "";
         bool serverMACProvided = false;
 
         for (int i = 2; i < argc; i++) {
@@ -3291,6 +3586,12 @@ int main(int argc, char* argv[]) {
                 serverMACProvided = true;
             } else if ((arg == "-n" || arg == "--iterations") && i + 1 < argc) {
                 iterations = std::stoi(argv[++i]);
+            } else if (arg == "--batch-size" && i + 1 < argc) {
+                batchSize = std::stoi(argv[++i]);
+            } else if (arg == "--warmup" && i + 1 < argc) {
+                warmupIters = std::stoi(argv[++i]);
+            } else if (arg == "--output" && i + 1 < argc) {
+                outputFile = argv[++i];
             } else if (arg == "--help") {
                 std::cout << "\nBENCHMARK MODE - Performance testing\n" << std::endl;
                 std::cout << "Usage: " << argv[0] << " benchmark [options]\n" << std::endl;
@@ -3299,6 +3600,9 @@ int main(int argc, char* argv[]) {
                 std::cout << "OPTIONS:" << std::endl;
                 std::cout << "  -i, --interface <name>   Network interface (default: eth0)" << std::endl;
                 std::cout << "  -n, --iterations <n>     Iterations to run (default: 10)" << std::endl;
+                std::cout << "  --batch-size <n>         Batch size for benchmarking (default: 1)" << std::endl;
+                std::cout << "  --warmup <n>             Warmup iterations (default: 2)" << std::endl;
+                std::cout << "  --output <file>          Output results to CSV file" << std::endl;
                 std::cout << "  --help                   Show this help\n" << std::endl;
                 return 0;
             }
@@ -3493,14 +3797,13 @@ int main(int argc, char* argv[]) {
             std::cout << "====================\n" << std::endl;
         }
 
-        // Load tokenizer if provided
-        if (!tokenizerPath.empty()) {
-            std::cout << "Loading tokenizer: " << tokenizerPath << std::endl;
-            if (facade.loadTokenizer(tokenizerPath)) {
-                std::cout << "✓ Tokenizer loaded (vocab size: " << facade.getTokenizer().getVocabSize() << ")" << std::endl;
-            } else {
-                std::cerr << "Warning: Failed to load tokenizer" << std::endl;
-            }
+        // Load tokenizer (auto-load from GGUF if not provided)
+        std::string actualTokenizerPath = tokenizerPath.empty() ? "gguf" : tokenizerPath;
+        std::cout << "Loading tokenizer from: " << (actualTokenizerPath == "gguf" ? "embedded GGUF" : actualTokenizerPath) << std::endl;
+        if (facade.loadTokenizer(actualTokenizerPath)) {
+            std::cout << "✓ Tokenizer loaded (vocab size: " << facade.getTokenizer().getVocabSize() << ")" << std::endl;
+        } else {
+            std::cerr << "Warning: Failed to load tokenizer" << std::endl;
         }
 
         // Run forward pass if prompt provided
