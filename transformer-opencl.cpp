@@ -719,7 +719,9 @@ std::vector<uint8_t> packTensorData(const std::vector<float>& data, int) {
 // ==================== Raw Socket Helpers ====================
 
 static int createRawSocket(const std::string& ifName) {
-    int s = socket(PF_PACKET, SOCK_RAW, htons(DTX_ETHERTYPE));
+    // Use ETH_P_ALL to capture all Ethernet frames
+    // This allows us to filter by EtherType in the application layer
+    int s = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (s < 0) {
         std::cerr << "Error: Cannot create raw socket. Need root privileges." << std::endl;
         return -1;
@@ -740,10 +742,9 @@ static int createRawSocket(const std::string& ifName) {
     struct sockaddr_ll bindAddr;
     memset(&bindAddr, 0, sizeof(bindAddr));
     bindAddr.sll_family = AF_PACKET;
-    bindAddr.sll_protocol = htons(DTX_ETHERTYPE);
+    // Don't specify protocol in bind - we'll filter by EtherType in receiveRawFrame
+    bindAddr.sll_protocol = 0;
     bindAddr.sll_ifindex = ifIndex;
-    bindAddr.sll_hatype = 1;
-    bindAddr.sll_halen = 6;
 
     if (bind(s, (struct sockaddr*)&bindAddr, sizeof(bindAddr)) < 0) {
         std::cerr << "Error: Cannot bind socket to interface: " << ifName << std::endl;
@@ -756,74 +757,80 @@ static int createRawSocket(const std::string& ifName) {
 
 static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
                          const std::vector<uint8_t>& payload, const std::string& ifName = "") {
-    if (s < 0) {
-        std::cerr << "sendRawFrame: socket is invalid" << std::endl;
-        return false;
-    }
+     if (s < 0) {
+         std::cerr << "sendRawFrame: socket is invalid" << std::endl;
+         return false;
+     }
 
-    std::vector<uint8_t> frame(14 + payload.size());
-    memcpy(&frame[0], destMAC, 6);
-    memcpy(&frame[6], srcMAC, 6);
-    uint16_t etherType = htons(DTX_ETHERTYPE);
-    memcpy(&frame[12], &etherType, 2);
-    memcpy(&frame[14], payload.data(), payload.size());
+     std::vector<uint8_t> frame(14 + payload.size());
+     memcpy(&frame[0], destMAC, 6);
+     memcpy(&frame[6], srcMAC, 6);
+     uint16_t etherType = htons(DTX_ETHERTYPE);
+     memcpy(&frame[12], &etherType, 2);
+     memcpy(&frame[14], payload.data(), payload.size());
 
-    struct sockaddr_ll addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sll_family = AF_PACKET;
-    addr.sll_protocol = htons(DTX_ETHERTYPE);
+     struct sockaddr_ll addr;
+     memset(&addr, 0, sizeof(addr));
+     addr.sll_family = AF_PACKET;
+     addr.sll_protocol = 0; // Protocol doesn't matter for sending raw frames
 
-    if (!ifName.empty()) {
-        addr.sll_ifindex = if_nametoindex(ifName.c_str());
-        if (addr.sll_ifindex == 0) {
-            std::cerr << "Error: Cannot get index for interface " << ifName << std::endl;
-            return false;
-        }
-    } else {
-        addr.sll_ifindex = 1;
-    }
+     // Get interface index from name
+     if (!ifName.empty()) {
+         addr.sll_ifindex = if_nametoindex(ifName.c_str());
+         if (addr.sll_ifindex == 0) {
+             std::cerr << "Error: Cannot get index for interface " << ifName << std::endl;
+             return false;
+         }
+     } else {
+         addr.sll_ifindex = 1; // loopback as fallback
+     }
 
-    addr.sll_halen = ETH_ALEN;
-    memcpy(addr.sll_addr, destMAC, ETH_ALEN);
+     addr.sll_halen = ETH_ALEN;
+     memcpy(addr.sll_addr, destMAC, ETH_ALEN);
 
-    ssize_t sent = sendto(s, frame.data(), frame.size(), 0,
-                          (struct sockaddr*)&addr, sizeof(addr));
-    if (sent != (ssize_t)frame.size()) {
-        std::cerr << "sendto failed: sent " << sent << " bytes, expected " << frame.size() << std::endl;
-        return false;
-    }
-    return true;
+     ssize_t sent = sendto(s, frame.data(), frame.size(), 0,
+                           (struct sockaddr*)&addr, sizeof(addr));
+     if (sent != (ssize_t)frame.size()) {
+         std::cerr << "sendto failed: sent " << sent << " bytes, expected " << frame.size() << std::endl;
+         return false;
+     }
+     return true;
 }
 
 static bool receiveRawFrame(int s, EthernetFrame& frame, int timeoutMs) {
-    if (s < 0) return false;
+     if (s < 0) return false;
 
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(s, &fds);
+     fd_set fds;
+     FD_ZERO(&fds);
+     FD_SET(s, &fds);
 
-    struct timeval tv;
-    tv.tv_sec = timeoutMs / 1000;
-    tv.tv_usec = (timeoutMs % 1000) * 1000;
+     struct timeval tv;
+     tv.tv_sec = timeoutMs / 1000;
+     tv.tv_usec = (timeoutMs % 1000) * 1000;
 
-    int ret = select(s + 1, &fds, nullptr, nullptr, &tv);
-    if (ret <= 0) return false;
+     int ret = select(s + 1, &fds, nullptr, nullptr, &tv);
+     if (ret <= 0) return false;
 
-    std::vector<uint8_t> buffer(2048);
-    struct sockaddr_ll srcAddr;
-    socklen_t addrLen = sizeof(srcAddr);
+     std::vector<uint8_t> buffer(2048);
+     struct sockaddr_ll srcAddr;
+     socklen_t addrLen = sizeof(srcAddr);
 
-    ssize_t recvLen = recvfrom(s, buffer.data(), buffer.size(), 0,
-                              (struct sockaddr*)&srcAddr, &addrLen);
-    if (recvLen < 14) return false;
+     ssize_t recvLen = recvfrom(s, buffer.data(), buffer.size(), 0,
+                                (struct sockaddr*)&srcAddr, &addrLen);
+     if (recvLen < 14) return false;
 
-    memcpy(frame.destMAC, &buffer[0], 6);
-    memcpy(frame.srcMAC, &buffer[6], 6);
-    memcpy(&frame.etherType, &buffer[12], 2);
-    frame.etherType = ntohs(frame.etherType);
+     memcpy(frame.destMAC, &buffer[0], 6);
+     memcpy(frame.srcMAC, &buffer[6], 6);
+     memcpy(&frame.etherType, &buffer[12], 2);
+     frame.etherType = ntohs(frame.etherType);
 
-    frame.payload.assign(&buffer[14], &buffer[14] + recvLen - 14);
-    return true;
+     // Filter for our custom DTX EtherType
+     if (frame.etherType != DTX_ETHERTYPE) {
+         return false;
+     }
+
+     frame.payload.assign(&buffer[14], &buffer[14] + recvLen - 14);
+     return true;
 }
 
 // ==================== TransformerServer Implementation ====================
@@ -1091,7 +1098,7 @@ bool TransformerServer::sendFrame(const uint8_t* destMAC, const DTXHeader& hdr,
         memcpy(&framePayload[sizeof(DTXHeader)], payload, hdr.payloadLen);
     }
 
-    return sendRawFrame(rawSocket, destMAC, localMAC, framePayload);
+    return sendRawFrame(rawSocket, destMAC, localMAC, framePayload, interfaceName);
 }
 
 bool TransformerServer::receiveFrame(EthernetFrame& frame, int timeoutMs) {
@@ -1354,7 +1361,7 @@ bool TransformerClient::sendFrame(const DTXHeader& hdr, const uint8_t* payload) 
         memcpy(&framePayload[sizeof(DTXHeader)], payload, hdr.payloadLen);
     }
 
-    return sendRawFrame(rawSocket, serverMAC, localMAC, framePayload);
+    return sendRawFrame(rawSocket, serverMAC, localMAC, framePayload, interfaceName);
 }
 
 bool TransformerClient::receiveFrame(EthernetFrame& frame, int timeoutMs) {
