@@ -1,4 +1,4 @@
-NOTE: cuda version is rock stable I am working on the opencl version. its passing tests but is timming out on inference thanx for your patience.
+NOTE: cuda version is stable I am working on the opencl version. its passing tests but is timming out on inference thanx for your patience.
 
 
 # GlassBoxAI-Transformer
