@@ -274,18 +274,6 @@ Smaller quantizations mean faster inference and lower memory footprint, at (pote
 
 ---
 
-## Testing & Safety
-
-This project maintains one of the most exhaustive open test suites for transformers and distributed LLMs:
-
-- **317+ Tests, 100% Passing (as of latest release).**
-  - Protocol, networking, edge cases, code quality, kernel correctness, quantization, GGUF/tokenizer/file handling, CLI coverage, and introspection.
-- **Code checks for style, safety, and reproducibility.**
-- **Easy to validate—run the suite yourself (`./COMPREHENSIVE_TEST_SUITE.sh`).**
-- **Bit-exactness and gold-standard output validation planned for future releases.**
-
----
-
 ## License
 
 Open source (MIT). See [LICENSE](LICENSE).
