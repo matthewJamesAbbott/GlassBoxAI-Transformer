@@ -1,4 +1,16 @@
-Macos Metal is still being worked on thankyou for your patience.
+this repo is still under work.
+it is a massive task to get a transformer working with off loading via cpu gpu and off loading.
+I was going to take this off line till I had it finished as I fear my poor ego being hurt ;)
+
+but no I think I will keep it in the open so you can all see what I am doing here.
+
+we are not far I have the distributed system working now.
+
+please be patient I wish to make us a method of off loading layers over bonded thunderport via layer 2 network (which is going so dont think you can
+patent it :) ).
+
+
+I will keep at this
 
 # GlassBoxAI-Transformer
 
