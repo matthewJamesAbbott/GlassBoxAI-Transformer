@@ -12,6 +12,10 @@ patent it :) ).
 
 I will keep at this
 
+one more thing I am naming this tech I made.
+
+DTX distributed transformer exchange.
+
 # GlassBoxAI-Transformer
 
 **A distributed, introspectable, cross-platform transformer for everyone.**
