@@ -291,15 +291,3 @@ This project maintains one of the most exhaustive open test suites for transform
 Open source (MIT). See [LICENSE](LICENSE).
 
 ---
-
-## Acknowledgments & History
-
-This project was designed and implemented by [Matthew Abbott](https://github.com/matthewJamesAbbott) and community, inspired by the need for a robust, distributed, transparent transformer for everyone—not just for the audio or scene community, but all users, domains, and hardware.
-
----
-
-## Contact / Further Info
-
-Issues, improvements, and discussion are welcome via GitHub issues and Pull Requests.
-
----
