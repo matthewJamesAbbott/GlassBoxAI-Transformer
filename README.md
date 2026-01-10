@@ -1,3 +1,5 @@
+Macos Metal is still being worked on thankyou for your patience.
+
 # GlassBoxAI-Transformer
 
 **A distributed, introspectable, cross-platform transformer for everyone.**
