@@ -1,5 +1,5 @@
 this repo is still under work.
-it is a massive task to get a transformer working with off loading via cpu gpu and off loading.
+it is a massive task to get a transformer working with off loading via cpu gpu and layer 2 network off loading.
 I was going to take this off line till I had it finished as I fear my poor ego being hurt ;)
 
 but no I think I will keep it in the open so you can all see what I am doing here.
