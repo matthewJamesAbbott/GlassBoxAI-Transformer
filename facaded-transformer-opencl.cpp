@@ -746,40 +746,40 @@ std::vector<uint8_t> packTensorData(const std::vector<float>& data, int) {
 // ==================== Raw Socket Helpers ====================
 
 static int createRawSocket(const std::string& ifName) {
-    // Use ETH_P_ALL (0) to capture all Ethernet frames
-    // This allows us to filter by EtherType in the application layer
-    int s = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-    if (s < 0) {
-        std::cerr << "Error: Cannot create raw socket. Need root privileges." << std::endl;
-        return -1;
-    }
+     // Use ETH_P_ALL to capture all Ethernet frames
+     // This allows us to filter by EtherType in the application layer
+     int s = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+     if (s < 0) {
+         std::cerr << "Error: Cannot create raw socket. Need root privileges." << std::endl;
+         return -1;
+     }
 
-    struct ifreq ifReq;
-    memset(&ifReq, 0, sizeof(ifReq));
-    strncpy(ifReq.ifr_name, ifName.c_str(), IFNAMSIZ - 1);
+     struct ifreq ifReq;
+     memset(&ifReq, 0, sizeof(ifReq));
+     strncpy(ifReq.ifr_name, ifName.c_str(), IFNAMSIZ - 1);
 
-    if (ioctl(s, SIOCGIFINDEX, &ifReq) < 0) {
-        std::cerr << "Error: Cannot get interface index for: " << ifName << std::endl;
-        close(s);
-        return -1;
-    }
+     if (ioctl(s, SIOCGIFINDEX, &ifReq) < 0) {
+         std::cerr << "Error: Cannot get interface index for: " << ifName << std::endl;
+         close(s);
+         return -1;
+     }
 
-    int ifIndex = ifReq.ifr_ifindex;
+     int ifIndex = ifReq.ifr_ifindex;
 
-    struct sockaddr_ll bindAddr;
-    memset(&bindAddr, 0, sizeof(bindAddr));
-    bindAddr.sll_family = AF_PACKET;
-    // Don't specify protocol in bind - we'll filter by EtherType in receiveRawFrame
-    bindAddr.sll_protocol = 0;
-    bindAddr.sll_ifindex = ifIndex;
+     struct sockaddr_ll bindAddr;
+     memset(&bindAddr, 0, sizeof(bindAddr));
+     bindAddr.sll_family = AF_PACKET;
+     // Don't specify protocol in bind - we'll filter by EtherType in receiveRawFrame
+     bindAddr.sll_protocol = 0;
+     bindAddr.sll_ifindex = ifIndex;
 
-    if (bind(s, (struct sockaddr*)&bindAddr, sizeof(bindAddr)) < 0) {
-        std::cerr << "Error: Cannot bind socket to interface: " << ifName << std::endl;
-        close(s);
-        return -1;
-    }
+     if (bind(s, (struct sockaddr*)&bindAddr, sizeof(bindAddr)) < 0) {
+         std::cerr << "Error: Cannot bind socket to interface: " << ifName << std::endl;
+         close(s);
+         return -1;
+     }
 
-    return s;
+     return s;
 }
 
 // sendRawFrame uses sendto to transmit Ethernet frames
@@ -789,7 +789,7 @@ static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
         std::cerr << "sendRawFrame: socket is invalid" << std::endl;
         return false;
     }
-
+    
     std::vector<uint8_t> frame(14 + payload.size());
     memcpy(&frame[0], destMAC, 6);
     memcpy(&frame[6], srcMAC, 6);
@@ -801,7 +801,7 @@ static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
     memset(&addr, 0, sizeof(addr));
     addr.sll_family = AF_PACKET;
     addr.sll_protocol = 0; // Protocol doesn't matter for sending raw frames
-    
+
     // Get interface index from name
     if (!ifName.empty()) {
         addr.sll_ifindex = if_nametoindex(ifName.c_str());
@@ -812,7 +812,7 @@ static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
     } else {
         addr.sll_ifindex = 1; // loopback as fallback
     }
-    
+
     addr.sll_halen = ETH_ALEN;
     memcpy(addr.sll_addr, destMAC, ETH_ALEN);
 
@@ -825,42 +825,40 @@ static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
     return true;
 }
 
-// receiveRawFrame uses recvfrom to receive Ethernet frames
-// Uses select with FD_SET for timeout, with tv_sec and tv_usec
 static bool receiveRawFrame(int s, EthernetFrame& frame, int timeoutMs) {
-    if (s < 0) return false;
+     if (s < 0) return false;
 
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(s, &fds);
+     fd_set fds;
+     FD_ZERO(&fds);
+     FD_SET(s, &fds);
 
-    struct timeval tv;
-    tv.tv_sec = timeoutMs / 1000;
-    tv.tv_usec = (timeoutMs % 1000) * 1000;
+     struct timeval tv;
+     tv.tv_sec = timeoutMs / 1000;
+     tv.tv_usec = (timeoutMs % 1000) * 1000;
 
-    int ret = select(s + 1, &fds, nullptr, nullptr, &tv);
-    if (ret <= 0) return false;
+     int ret = select(s + 1, &fds, nullptr, nullptr, &tv);
+     if (ret <= 0) return false;
 
-    std::vector<uint8_t> buffer(2048);
-    struct sockaddr_ll srcAddr;
-    socklen_t addrLen = sizeof(srcAddr);
+     std::vector<uint8_t> buffer(2048);
+     struct sockaddr_ll srcAddr;
+     socklen_t addrLen = sizeof(srcAddr);
 
-    ssize_t recvLen = recvfrom(s, buffer.data(), buffer.size(), 0,
-                               (struct sockaddr*)&srcAddr, &addrLen);
-    if (recvLen < 14) return false;
+     ssize_t recvLen = recvfrom(s, buffer.data(), buffer.size(), 0,
+                                (struct sockaddr*)&srcAddr, &addrLen);
+     if (recvLen < 14) return false;
 
-    memcpy(frame.destMAC, &buffer[0], 6);
-    memcpy(frame.srcMAC, &buffer[6], 6);
-    memcpy(&frame.etherType, &buffer[12], 2);
-    frame.etherType = ntohs(frame.etherType);
+     memcpy(frame.destMAC, &buffer[0], 6);
+     memcpy(frame.srcMAC, &buffer[6], 6);
+     memcpy(&frame.etherType, &buffer[12], 2);
+     frame.etherType = ntohs(frame.etherType);
 
-    // Filter for our custom DTX EtherType
-    if (frame.etherType != DTX_ETHERTYPE) {
-        return false;
-    }
+     // Filter for our custom DTX EtherType
+     if (frame.etherType != DTX_ETHERTYPE) {
+         return false;
+     }
 
-    frame.payload.assign(&buffer[14], &buffer[14] + recvLen - 14);
-    return true;
+     frame.payload.assign(&buffer[14], &buffer[14] + recvLen - 14);
+     return true;
 }
 
 // ==================== TransformerServer ====================
