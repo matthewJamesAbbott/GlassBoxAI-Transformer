@@ -6,7 +6,7 @@ but no I think I will keep it in the open so you can all see what I am doing her
 
 we are not far I have the distributed system working now.
 
-please be patient I wish to make us a method of off loading layers over bonded thunderport via layer 2 network (which is going so dont think you can
+please be patient I wish to make us a method of off loading layers over bonded thunderbolt via layer 2 network (which is going so dont think you can
 patent it :) ).
 
 
