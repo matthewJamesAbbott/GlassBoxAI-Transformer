@@ -65,6 +65,26 @@ This project demonstrates enterprise-grade software engineering practices includ
 | **Sampling Methods** | Temperature, Top-K, Top-P (nucleus) sampling |
 | **Streaming Output** | Token-by-token generation output |
 
+### Distributed Inference (Layer 2 Ethernet)
+
+| Feature | Description |
+|---------|-------------|
+| **DTX Protocol** | Custom Layer 2 Ethernet protocol (EtherType 0x9998) |
+| **Raw Socket Communication** | Direct Ethernet frame transmission for minimal latency |
+| **Distributed Layer Offloading** | Offload transformer layers to remote GPU nodes |
+| **Server/Client Architecture** | TransformerServer and TransformerClient components |
+| **Multi-Client Support** | Handle multiple concurrent inference clients |
+| **Chunked Tensor Transfer** | Efficient large tensor transmission with checksums |
+
+### CPU/GPU Offloading
+
+| Feature | Description |
+|---------|-------------|
+| **Mixed Device Execution** | Run specific layers on CPU while others run on GPU |
+| **Layer-by-Layer Control** | Specify exactly which layers to offload |
+| **Memory Optimization** | Offload layers when GPU memory is limited |
+| **Automatic Fallback** | CPU execution for unsupported operations |
+
 ### GPU Acceleration
 
 | Backend | Implementation | Performance | Status |
@@ -136,11 +156,14 @@ GlassBoxAI-Transformer/
 │
 ├── transformer.cu                  # C++ CUDA Transformer implementation
 ├── facaded_transformer.cu          # C++ CUDA Transformer with Facade pattern
+├── agentic_transformer.cu          # C++ CUDA Transformer with agentic interface & CPU offloading
 ├── transformer-opencl.cpp          # C++ OpenCL Transformer implementation
 ├── facaded-transformer-opencl.cpp  # C++ OpenCL Transformer with Facade pattern
 │
 ├── transformer_metal.mm            # C++ Metal Transformer (🚧 In Development)
 ├── transformer_kernels.metal       # Metal shader kernels (🚧 In Development)
+│
+├── transformer_gui.py              # Python/Qt GUI for interactive inference
 │
 ├── rust_cuda/                      # Rust CUDA Transformer implementation
 │   ├── Cargo.toml
@@ -152,7 +175,9 @@ GlassBoxAI-Transformer/
 │       ├── tokenizer.rs            # BPE tokenizer
 │       ├── quant.rs                # Dequantization routines
 │       ├── kernels.rs              # CUDA kernel definitions
-│       └── error.rs                # Error types
+│       ├── error.rs                # Error types
+│       ├── network.rs              # TransformerServer/Client for distributed inference
+│       └── protocol.rs             # DTX Layer 2 Ethernet protocol implementation
 │
 ├── facaded_rust_cuda/              # Rust CUDA Transformer with Facade pattern
 │   ├── Cargo.toml
@@ -276,7 +301,7 @@ g++ -O2 -std=c++17 -o facaded-transformer-opencl facaded-transformer-opencl.cpp 
 
 ### **Standard Transformer Commands**
 
-The standard transformer implementations provide core LLM inference functionality.
+The standard transformer implementations provide core LLM inference functionality with distributed inference support.
 
 #### Usage
 
@@ -290,23 +315,87 @@ rust_cuda/target/release/glassbox-transformer <command> [options]
 
 | Command | Description |
 |---------|-------------|
-| `generate` | Generate text from a prompt |
-| `info` | Display model information |
+| `server` | Run as distributed inference server |
+| `client` | Run as distributed inference client |
+| `benchmark` | Run network/inference benchmarks |
 | `test` | Run built-in tests |
 | `help` | Show help information |
 
-#### Generate Options
+#### Server Mode Options
 
 | Option | Description |
 |--------|-------------|
-| `-m, --model <path>` | Path to GGUF model file (required) |
-| `-p, --prompt <text>` | Text prompt for generation |
-| `-n, --tokens <n>` | Max tokens to generate (default: 256) |
-| `-t, --temperature <n>` | Sampling temperature (default: 0.7) |
-| `--top-k <n>` | Top-K sampling (default: 40) |
-| `--top-p <n>` | Top-P/nucleus sampling (default: 0.9) |
-| `-i, --interactive` | Interactive chat mode |
-| `-g, --gpu` | Use GPU-accelerated inference |
+| `-i, --interface <name>` | Network interface (default: eth0) |
+| `-l, --layers <n>` | Total transformer layers (default: 12) |
+| `-e, --embed <dim>` | Embedding dimension (default: 768) |
+| `-f, --ffn <dim>` | FFN hidden dimension (default: 3072) |
+| `-a, --heads <n>` | Number of attention heads (default: 12) |
+| `-k, --kvheads <n>` | Number of KV heads for GQA (default: 12) |
+| `-q, --seq-len <n>` | Sequence length (default: 512) |
+| `-v, --vocab-size <n>` | Vocabulary size (default: 50257) |
+| `-x, --max-seq-len <n>` | Maximum sequence length (default: 2048) |
+| `-m, --messages <n>` | Max messages to process (default: 100) |
+| `-g, --gpu <yes/no>` | GPU availability (default: yes) |
+| `-c, --clients <n>` | Max concurrent clients (default: 4) |
+| `--quant <type>` | Quantization type: none\|q4_0\|q4_1\|q5_0\|q5_1\|q8_0\|q2_k\|q3_k\|q4_k\|q5_k\|q6_k |
+| `--rope-base <n>` | RoPE base frequency (default: 10000.0) |
+| `--rope-scale <n>` | RoPE scaling factor (default: 1.0) |
+| `--eps <n>` | Layer norm epsilon (default: 1e-5) |
+| `--dropout <n>` | Dropout rate 0.0-1.0 (default: 0.0) |
+| `--verbose` | Enable verbose output |
+
+#### Client Mode Options
+
+| Option | Description |
+|--------|-------------|
+| `-i, --interface <name>` | Network interface (default: eth0) |
+| `-s, --server <mac>` | Server MAC address (required, XX:XX:XX:XX:XX:XX) |
+| `-l, --layers <n>` | Total transformer layers (default: 12) |
+| `-r, --remote <n>` | Remote layers to execute (default: 6) |
+| `--start-layer <n>` | Starting layer for remote execution (default: auto) |
+| `-e, --embed <dim>` | Embedding dimension (default: 768) |
+| `-f, --ffn <dim>` | FFN hidden dimension (default: 3072) |
+| `-a, --heads <n>` | Number of attention heads (default: 12) |
+| `-k, --kvheads <n>` | KV heads for GQA (default: 12) |
+| `-q, --seq-len <n>` | Sequence length (default: 512) |
+| `-v, --vocab-size <n>` | Vocabulary size (default: 50257) |
+| `-x, --max-seq-len <n>` | Maximum sequence length (default: 2048) |
+| `--quant <type>` | Quantization type (see server options) |
+| `--rope-base <n>` | RoPE base frequency (default: 10000.0) |
+| `--rope-scale <n>` | RoPE scaling factor (default: 1.0) |
+| `--eps <n>` | Layer norm epsilon (default: 1e-5) |
+| `--no-cache` | Disable activation caching |
+| `--no-grad-cache` | Disable gradient caching |
+| `--timeout <ms>` | Connection timeout (default: 5000ms) |
+| `--retries <n>` | Connection retry count (default: 3) |
+| `--verbose` | Enable verbose output |
+
+#### Benchmark Mode Options
+
+| Option | Description |
+|--------|-------------|
+| `-i, --interface <name>` | Network interface (default: eth0) |
+| `-s, --server <mac>` | Server MAC address (required) |
+| `-n, --iterations <n>` | Benchmark iterations (default: 10) |
+| `-l, --layers <n>` | Transformer layers to benchmark (default: 12) |
+| `-e, --embed <dim>` | Embedding dimension (default: 768) |
+| `-q, --seq-len <n>` | Sequence length (default: 512) |
+| `--batch-size <n>` | Batch size for benchmarking (default: 1) |
+| `--warmup <n>` | Warmup iterations (default: 2) |
+| `--output <file>` | Output results to CSV file |
+| `--verbose` | Enable verbose output |
+
+#### Test Mode Options
+
+| Option | Description |
+|--------|-------------|
+| `--all` | Run all tests |
+| `--protocol` | Test protocol handling |
+| `--config` | Test configuration |
+| `--quant` | Test quantization/dequantization |
+| `--kernels` | Test CUDA kernels (requires GPU) |
+| `--network` | Test network layer |
+| `--verbose` | Enable verbose test output |
 
 #### Examples
 
@@ -322,6 +411,19 @@ rust_cuda/target/release/glassbox-transformer <command> [options]
 
 # Run tests
 ./transformer-cuda test --all
+
+# CPU offloading - run layers 0,1,2 on CPU, rest on GPU
+./transformer-cuda generate -m models/llama.gguf -p "Hello" --cpu-layers 0,1,2
+
+# All CPU execution (for systems without GPU)
+./transformer-cuda generate -m models/tinyllama.gguf -p "Hello" --all-cpu
+
+# Distributed inference - start server on remote GPU node
+sudo ./transformer-cuda --server --interface eth0
+
+# Distributed inference - connect client to server
+sudo ./transformer-cuda generate -m models/llama.gguf -p "Hello" \
+    --client --interface eth0 --remote-mac aa:bb:cc:dd:ee:ff -r 6
 ```
 
 ---
@@ -330,25 +432,71 @@ rust_cuda/target/release/glassbox-transformer <command> [options]
 
 The facade implementations add deep introspection capabilities for analyzing model internals.
 
-#### Additional Commands
+#### Commands
 
 | Command | Description |
 |---------|-------------|
-| `analyze` | Analyze model internals for a prompt |
-| `inspect` | Interactive inspection mode |
-| `introspect` | Access hidden states and attention |
+| `server` | Run as distributed inference server |
+| `client` | Run as distributed inference client |
+| `facade` | Run facade mode with introspection |
+| `generate` | Text generation from GGUF model |
+| `benchmark` | Run network/inference benchmarks |
+| `test` | Run built-in tests |
 
-#### Introspection Options
+#### Facade Mode Options
 
 | Option | Description |
 |--------|-------------|
-| `--show-hidden` | Show hidden state statistics |
-| `--show-entropy` | Show attention entropy |
-| `--show-qkv` | Show Q/K/V vectors |
-| `--show-logits` | Show top-k logits |
-| `--show-saliency` | Show saliency map |
-| `--layer <n>` | Layer to inspect (default: last) |
-| `--head <n>` | Attention head to inspect (default: 0) |
+| `--model <path>` | GGUF model file path (required) |
+| `--tokenizer <path>` | Tokenizer JSON file path |
+| `--prompt <text>` | Text prompt for generation |
+| `--max-tokens <n>` | Maximum tokens to generate (default: 100) |
+| `--temperature <n>` | Sampling temperature (default: 1.0) |
+| `--top-k <n>` | Top-K sampling (default: 40) |
+| `--top-p <n>` | Top-P nucleus sampling (default: 0.9) |
+| `--inspect` | Enable introspection mode |
+| `--show-attention` | Display attention weights |
+| `--show-hidden <layer>` | Display hidden states for layer |
+| `--show-qkv <layer>` | Display Q/K/V vectors for layer |
+| `--show-logits` | Display output logits |
+| `--show-entropy` | Display attention entropy per layer |
+| `--show-saliency <pos>` | Display saliency map for token position |
+| `--show-weights <layer>` | Display weight matrices for layer |
+| `--show-tensors` | List all tensor names in model |
+| `--dump-hidden <file>` | Dump hidden states to CSV file |
+| `--dump-attention <file>` | Dump attention weights to CSV file |
+| `--layer <n>` | Specific layer for inspection (default: all) |
+| `--head <n>` | Specific attention head (default: all) |
+| `--position <n>` | Specific token position (default: all) |
+| `--verbose` | Enable verbose output |
+
+#### Generate Mode Options
+
+| Option | Description |
+|--------|-------------|
+| `-m, --model <path>` | Path to GGUF model file (required) |
+| `-p, --prompt <text>` | Text prompt for generation |
+| `-n, --tokens <n>` | Max tokens to generate (default: 256) |
+| `-t, --temperature <n>` | Sampling temperature (default: 0.7) |
+| `--top-k <n>` | Top-K sampling (default: 40) |
+| `--top-p <n>` | Top-P/nucleus sampling (default: 0.9) |
+| `-i, --interactive` | Interactive chat mode |
+| `-g, --gpu` | Use GPU-accelerated inference |
+
+#### Test Mode Options (Facade)
+
+| Option | Description |
+|--------|-------------|
+| `--all` | Run all tests |
+| `--protocol` | Test protocol handling |
+| `--config` | Test configuration |
+| `--quant` | Test quantization/dequantization |
+| `--kernels` | Test CUDA kernels (requires GPU) |
+| `--network` | Test network layer |
+| `--facade` | Test facade introspection functions |
+| `--tokenizer` | Test tokenizer encode/decode |
+| `--gguf` | Test GGUF model loading |
+| `--verbose` | Enable verbose test output |
 
 #### Facade API Methods
 
@@ -366,15 +514,348 @@ The facade provides programmatic access to internal states:
 #### Facade Examples
 
 ```bash
-# Analyze model internals
-./facaded-transformer-cuda analyze -m models/llama.gguf -p "What is AI?" --show-qkv
+# Run facade with introspection
+./facaded-transformer-cuda facade --model model.gguf --tokenizer tok.json \
+    --prompt "Hello" --inspect
 
-# Generate with hidden state display
-./facaded-transformer-cuda generate -m models/llama.gguf -p "Hello" --show-hidden
+# Show attention weights for layer 0
+./facaded-transformer-cuda facade --model model.gguf --prompt "Test" \
+    --show-attention --layer 0
 
-# Interactive inspection
-./facaded-transformer-cuda inspect -m models/llama.gguf
+# Dump hidden states to CSV
+./facaded-transformer-cuda facade --model model.gguf --prompt "Test" \
+    --dump-hidden hidden.csv
+
+# Generate text with GPU acceleration
+./facaded-transformer-cuda generate -m models/llama.gguf -p "Hello" -g
+
+# Interactive chat mode
+./facaded-transformer-cuda generate -m models/llama.gguf -i -g
 ```
+
+---
+
+### **Rust Transformer Commands**
+
+The Rust implementations provide memory-safe inference with formal verification.
+
+#### Commands (rust_cuda)
+
+| Command | Description |
+|---------|-------------|
+| `generate` | Text generation from GGUF model |
+| `server` | Run as distributed inference server |
+| `client` | Run as distributed inference client |
+| `info` | Display model information |
+
+#### Generate Mode Options (Rust)
+
+| Option | Description |
+|--------|-------------|
+| `-m, --model <path>` | Path to GGUF model file (required) |
+| `-p, --prompt <text>` | Text prompt for generation |
+| `-n, --tokens <n>` | Max tokens to generate (default: 256) |
+| `-t, --temperature <n>` | Sampling temperature (default: 0.7) |
+| `--top-k <n>` | Top-K sampling (default: 40) |
+| `--top-p <n>` | Top-P/nucleus sampling (default: 0.9) |
+| `--rep-penalty <n>` | Repetition penalty (default: 1.1) |
+| `-i, --interactive` | Interactive chat mode |
+
+#### Server Mode Options (Rust)
+
+| Option | Description |
+|--------|-------------|
+| `-i, --interface <name>` | Network interface (default: eth0) |
+| `--server-id <n>` | Server ID for multi-server setups |
+
+#### Client Mode Options (Rust)
+
+| Option | Description |
+|--------|-------------|
+| `-s, --server <mac>` | Server MAC address (required, XX:XX:XX:XX:XX:XX) |
+| `-i, --interface <name>` | Network interface (default: eth0) |
+| `-l, --layers <n>` | Total transformer layers (default: 12) |
+| `-r, --remote <n>` | Remote layers to offload (default: 6) |
+| `-e, --embed <dim>` | Embedding dimension (default: 768) |
+| `--timeout <ms>` | Connection timeout (default: 5000) |
+
+#### Commands (facaded_rust_cuda)
+
+| Command | Description |
+|---------|-------------|
+| `generate` | Text generation with introspection |
+| `analyze` | Analyze model internals for a prompt |
+| `inspect` | Interactive inspection mode |
+| `info` | Display model information |
+
+#### Generate Mode Options (Rust Facade)
+
+| Option | Description |
+|--------|-------------|
+| `-m, --model <path>` | Path to GGUF model file (required) |
+| `-p, --prompt <text>` | Text prompt for generation |
+| `-n, --tokens <n>` | Max tokens to generate (default: 256) |
+| `-t, --temperature <n>` | Sampling temperature (default: 0.7) |
+| `--top-k <n>` | Top-K sampling (default: 40) |
+| `--top-p <n>` | Top-P/nucleus sampling (default: 0.9) |
+| `-i, --interactive` | Interactive chat mode |
+| `--show-hidden` | Show hidden state statistics |
+| `--show-entropy` | Show attention entropy |
+
+#### Analyze Mode Options (Rust Facade)
+
+| Option | Description |
+|--------|-------------|
+| `-m, --model <path>` | Path to GGUF model file (required) |
+| `-p, --prompt <text>` | Text prompt to analyze (required) |
+| `--layer <n>` | Layer to inspect (default: last) |
+| `--head <n>` | Attention head to inspect (default: 0) |
+| `--show-qkv` | Show Q/K/V vectors |
+| `--show-logits` | Show top-k logits |
+| `--show-saliency` | Show saliency map |
+
+#### Rust Examples
+
+```bash
+# Generate text (rust_cuda)
+./rust_cuda/target/release/glassbox-transformer generate \
+    -m models/tinyllama.gguf -p "Hello world" -n 100
+
+# Interactive mode with repetition penalty
+./rust_cuda/target/release/glassbox-transformer generate \
+    -m models/llama.gguf -i --rep-penalty 1.2
+
+# Start distributed server
+sudo ./rust_cuda/target/release/glassbox-transformer server -i eth0
+
+# Connect as client with layer offloading
+sudo ./rust_cuda/target/release/glassbox-transformer client \
+    -s aa:bb:cc:dd:ee:ff -i eth0 -r 6
+
+# Analyze with Q/K/V inspection (facaded)
+./facaded_rust_cuda/target/release/glassbox-transformer-facaded analyze \
+    -m models/llama.gguf -p "What is AI?" --show-qkv --layer 0
+
+# Generate with hidden state display (facaded)
+./facaded_rust_cuda/target/release/glassbox-transformer-facaded generate \
+    -m models/llama.gguf -p "Hello" --show-hidden --show-entropy
+```
+
+---
+
+### **Agentic Transformer Commands**
+
+The agentic transformer provides an interactive agent interface with CPU offloading support.
+
+#### Usage Modes
+
+| Mode | Description |
+|------|-------------|
+| Interactive | Run with no arguments for REPL mode |
+| Script | `--script <file>` to run commands from file |
+| Stdin | `--stdin` to read commands from pipe |
+| Single | Direct prompt with `-p` flag |
+
+#### Generation Options
+
+| Option | Description |
+|--------|-------------|
+| `-p, --prompt <text>` | Input prompt for generation |
+| `-n, --max-tokens <n>` | Maximum tokens to generate (default: 5) |
+| `-t, --temperature <n>` | Sampling temperature 0.0-2.0 (default: 1.0) |
+| `--top-k <k>` | Top-K sampling (disable with -1) |
+| `--top-p <p>` | Nucleus/Top-P sampling 0.0-1.0 (default: 1.0) |
+| `--repetition-penalty <p>` | Penalize repeated tokens (default: 1.0) |
+| `--context-length <n>` | Max context window size (default: 1024) |
+| `--seed <s>` | Random seed for reproducibility |
+
+#### Scripting & Batch Options
+
+| Option | Description |
+|--------|-------------|
+| `--script <file>` | Load and execute commands from script file |
+| `--stdin` | Read commands from stdin (for piping) |
+| `--log <file>` | Write session log to file (default: agent_history.log) |
+| `--no-log` | Disable session logging |
+| `-o, --output <file>` | Save generated text to file |
+| `--json-output` | Format output as JSON |
+
+#### Inspection & Diagnostics
+
+| Option | Description |
+|--------|-------------|
+| `--list-tensors` | List all tensors in model and exit |
+| `--show-quant-stats` | Display quantization statistics (default: yes) |
+| `--no-quant-stats` | Skip quantization statistics output |
+| `--fp32-only` | Only load F32 tensors, skip quantized |
+| `--test-dequant` | Test dequantization on all quantized tensors |
+
+#### Device & Performance Options
+
+| Option | Description |
+|--------|-------------|
+| `--device <id>` | Select GPU device ID (default: 0) |
+| `--batch-size <n>` | Batch size for processing (default: 1) |
+| `--memory-limit <MB>` | Limit GPU memory usage in MB (0=unlimited) |
+| `--benchmark` | Run benchmark tests after generation |
+
+#### CPU Offloading Options
+
+| Option | Description |
+|--------|-------------|
+| `--cpu-layers <list>` | Run specified layers on CPU (e.g., `0,2,4`) |
+| `--all-cpu` | Run all transformer layers on CPU (RAM) |
+| `--all-gpu` | Run all transformer layers on GPU (default) |
+
+#### Interactive Agent Commands
+
+| Command | Description |
+|---------|-------------|
+| `load <model.gguf> <tok.json>` | Load model and tokenizer |
+| `run <prompt> [tokens] [temp]` | Run inference/generation |
+| `info` | Display model architecture |
+| `inspect [type]` | Inspect model (summary/performance/layers) |
+| `list-tensors` | List all model tensors |
+| `quant-stats` | Show quantization statistics |
+| `save <filename>` | Save last output to file |
+| `history` | Show action history |
+| `help` | Show agent commands |
+| `quit/exit` | Exit agent |
+
+#### Agentic Examples
+
+```bash
+# Interactive mode
+./agentic_transformer
+
+# Single generation with CPU offloading
+./agentic_transformer model.gguf tokenizer.json \
+    -p "Once upon a time" -n 50 -t 0.9 --cpu-layers 0,1,2
+
+# Batch mode from script
+./agentic_transformer model.gguf tokenizer.json \
+    --script commands.txt --log batch.log
+
+# Piped batch mode
+echo "load model.gguf tok.json" | ./agentic_transformer --stdin
+
+# List tensors and quantization stats
+./agentic_transformer model.gguf tokenizer.json --list-tensors
+./agentic_transformer model.gguf tokenizer.json --show-quant-stats
+```
+
+---
+
+## **Distributed Inference (Layer 2 Ethernet)**
+
+### Overview
+
+GlassBoxAI-Transformer supports distributed inference over Layer 2 Ethernet using the **DTX Protocol** (Distributed Tensor eXchange). This enables offloading transformer layers to remote GPU nodes with minimal latency by bypassing the TCP/IP stack entirely.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Distributed Transformer Inference                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────┐                    ┌─────────────────────┐        │
+│  │   Client Node       │    Layer 2         │   Server Node       │        │
+│  │                     │    Ethernet        │                     │        │
+│  │  ┌───────────────┐  │   (DTX Protocol)   │  ┌───────────────┐  │        │
+│  │  │ Local Layers  │  │  ───────────────►  │  │ Remote Layers │  │        │
+│  │  │   0..N-1      │  │                    │  │     N..M      │  │        │
+│  │  │   (GPU/CPU)   │  │  ◄───────────────  │  │    (GPU)      │  │        │
+│  │  └───────────────┘  │   Tensor Results   │  └───────────────┘  │        │
+│  │         │           │                    │         │           │        │
+│  │         ▼           │                    │         ▼           │        │
+│  │  ┌───────────────┐  │                    │  ┌───────────────┐  │        │
+│  │  │   RawSocket   │  │                    │  │   RawSocket   │  │        │
+│  │  │ EtherType:    │◄─┼────────────────────┼─►│ EtherType:    │  │        │
+│  │  │   0x9998      │  │                    │  │   0x9998      │  │        │
+│  │  └───────────────┘  │                    │  └───────────────┘  │        │
+│  └─────────────────────┘                    └─────────────────────┘        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### DTX Protocol Messages
+
+| Message Type | Description |
+|--------------|-------------|
+| `HandshakeReq/Ack` | Connection establishment with capability exchange |
+| `LayerConfig` | Configure which layers to process remotely |
+| `ForwardStart/Chunk/Done` | Forward pass tensor transmission |
+| `ForwardResult/Complete` | Forward pass results return |
+| `BackwardStart/Chunk/Done` | Backward pass gradient transmission |
+| `BackwardResult/Complete` | Backward pass results return |
+| `Ping/Pong` | Connection health monitoring |
+| `Disconnect` | Clean connection termination |
+
+### Requirements
+
+- **Root privileges**: Raw socket access requires `sudo`
+- **Same Layer 2 network**: Client and server must be on the same Ethernet segment
+- **Network interface**: Specify the interface name (e.g., `eth0`, `enp0s3`)
+
+### Example: Two-Node Setup
+
+**Server Node (has powerful GPU):**
+```bash
+sudo ./transformer-cuda --server --interface eth0
+# Server listening on interface eth0 (aa:bb:cc:dd:ee:ff)
+# Waiting for connections...
+```
+
+**Client Node (limited GPU memory):**
+```bash
+sudo ./transformer-cuda generate \
+    -m models/llama-7b.Q4_K_M.gguf \
+    -p "Explain quantum computing" \
+    --client --interface eth0 \
+    --remote-mac aa:bb:cc:dd:ee:ff \
+    -r 16  # Offload 16 layers to remote server
+```
+
+---
+
+## **CPU/GPU Offloading**
+
+### Overview
+
+For systems with limited GPU memory, GlassBoxAI-Transformer supports mixed device execution where specific transformer layers can be offloaded to CPU while the rest run on GPU.
+
+### Use Cases
+
+- **Large models on small GPUs**: Run 7B+ models on 4-6GB GPUs
+- **Memory pressure**: Avoid out-of-memory errors during inference
+- **Debugging**: Isolate CPU vs GPU computation issues
+- **CPU-only systems**: Run inference without any GPU
+
+### Configuration
+
+```bash
+# Offload first 4 layers to CPU
+./transformer-cuda generate -m model.gguf -p "Hello" --cpu-layers 0,1,2,3
+
+# Offload every other layer
+./transformer-cuda generate -m model.gguf -p "Hello" --cpu-layers 0,2,4,6,8
+
+# All CPU (no GPU required)
+./transformer-cuda generate -m model.gguf -p "Hello" --all-cpu
+
+# All GPU (default, maximum performance)
+./transformer-cuda generate -m model.gguf -p "Hello" --all-gpu
+```
+
+### Performance Considerations
+
+| Configuration | Performance | Memory Usage |
+|--------------|-------------|--------------|
+| All GPU | Fastest | Highest GPU memory |
+| Mixed (few CPU layers) | ~80-90% of GPU | Reduced GPU memory |
+| Mixed (many CPU layers) | ~30-50% of GPU | Minimal GPU memory |
+| All CPU | Slowest | No GPU memory |
 
 ---
 
