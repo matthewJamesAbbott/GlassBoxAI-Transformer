@@ -1,0 +1,26 @@
+[package]
+name = "glassbox-transformer"
+version = "0.1.0"
+edition = "2021"
+authors = ["Matthew Abbott"]
+license = "MIT"
+description = "GlassBox AI Transformer - CUDA accelerated transformer inference in Rust"
+repository = "https://github.com/matthewJamesAbbott/GlassBoxAI-Transformer"
+
+[dependencies]
+cudarc = { version = "0.12", features = ["cuda-12050", "nvrtc"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+half = "2.3"
+memmap2 = "0.9"
+thiserror = "1.0"
+rayon = "1.8"
+rand = "0.8"
+libc = "0.2"
+
+[features]
+default = []
+cuda-12050 = []
+
+[[bin]]
+name = "transformer-rust-cuda"
+path = "src/main.rs"

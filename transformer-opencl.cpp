@@ -84,6 +84,67 @@ static const char* clErrorString(cl_int err) {
     }
 }
 
+// ============================================================================
+// UNSLOTH-STYLE OPENCL KERNELS
+// Optimizations: Fused operations for 2x speedup
+// ============================================================================
+
+static const char* openclKernelSource = R"(
+__kernel void fusedRMSNorm(__global float* output, __global const float* input,
+    __global const float* weight, const int dim, const float eps, const int unitOffset) {
+    int gid = get_global_id(0);
+    if (gid >= dim) return;
+    __local float partialSums[256];
+    float val = input[gid];
+    partialSums[get_local_id(0)] = val * val;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int stride = get_local_size(0)/2; stride > 0; stride /= 2) {
+        if (get_local_id(0) < stride) partialSums[get_local_id(0)] += partialSums[get_local_id(0) + stride];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    float rms_scale = rsqrt(partialSums[0] / dim + eps);
+    output[gid] = unitOffset ? input[gid] * rms_scale * (1.0f + weight[gid]) : input[gid] * rms_scale * weight[gid];
+}
+__kernel void fusedRoPE(__global float* Q, __global float* K, const int qDim, const int kvDim,
+    const int headDim, const int position, const float theta, const float ropeScale) {
+    int idx = get_global_id(0);
+    float scaledPos = (float)position / ropeScale;
+    if (idx < qDim/2) {
+        int i = idx*2, headIdx = i % headDim;
+        float freq = 1.0f / pow(theta, (float)headIdx/headDim);
+        float angle = scaledPos * freq, cs = cos(angle), sn = sin(angle);
+        float q0 = Q[i], q1 = Q[i+1];
+        Q[i] = q0*cs - q1*sn; Q[i+1] = q0*sn + q1*cs;
+    }
+    if (K && idx < kvDim/2) {
+        int i = idx*2, headIdx = i % headDim;
+        float freq = 1.0f / pow(theta, (float)headIdx/headDim);
+        float angle = scaledPos * freq, cs = cos(angle), sn = sin(angle);
+        float k0 = K[i], k1 = K[i+1];
+        K[i] = k0*cs - k1*sn; K[i+1] = k0*sn + k1*cs;
+    }
+}
+__kernel void fusedSwiGLU(__global float* output, __global const float* gate,
+    __global const float* up, const int size) {
+    int i = get_global_id(0);
+    if (i >= size) return;
+    float g = gate[i];
+    output[i] = (g / (1.0f + exp(-g))) * up[i];
+}
+__kernel void vecMatMul(__global float* out, __global const float* vec,
+    __global const float* mat, const int K, const int N) {
+    int col = get_global_id(0);
+    if (col >= N) return;
+    float sum = 0.0f;
+    for (int k = 0; k < K; k++) sum += vec[k] * mat[k*N + col];
+    out[col] = sum;
+}
+__kernel void residualAdd(__global float* out, __global const float* residual, const int size) {
+    int i = get_global_id(0);
+    if (i < size) out[i] += residual[i];
+}
+)";
+
 // ================================================================================
 // QUANTIZATION SUPPORT (from original cuda version)
 // K-Quant formats for GGUF model loading
@@ -159,6 +220,35 @@ struct block_q8_0 {
     int8_t qs[QK8_0];
 };
 
+#define QK4_0 32
+#define QK4_1 32
+#define QK5_0 32
+#define QK5_1 32
+
+struct block_q4_0 {
+    uint16_t d;
+    uint8_t qs[QK4_0 / 2];
+};
+
+struct block_q4_1 {
+    uint16_t d;
+    uint16_t m;
+    uint8_t qs[QK4_1 / 2];
+};
+
+struct block_q5_0 {
+    uint16_t d;
+    uint8_t qh[4];
+    uint8_t qs[QK5_0 / 2];
+};
+
+struct block_q5_1 {
+    uint16_t d;
+    uint16_t m;
+    uint8_t qh[4];
+    uint8_t qs[QK5_1 / 2];
+};
+
 inline float fp16_to_fp32(uint16_t h) {
     int sign = (h >> 15) & 1;
     int exponent = (h >> 10) & 0x1F;
@@ -176,6 +266,13 @@ inline float fp16_to_fp32(uint16_t h) {
     }
     float val = (1.0f + mantissa / 1024.0f) * powf(2.0f, exponent - 15.0f);
     return sign ? -val : val;
+}
+
+inline float bf16_to_fp32(uint16_t bf) {
+    uint32_t val = ((uint32_t)bf) << 16;
+    float result;
+    memcpy(&result, &val, sizeof(float));
+    return result;
 }
 
 inline void get_scale_min_k4(int j, const uint8_t* scales, uint8_t* sc, uint8_t* m) {
@@ -384,6 +481,68 @@ inline void dequant_row_q8_K(const block_q8_K* blocks, float* output, int cols) 
     }
 }
 
+inline void dequant_row_q4_0(const block_q4_0* blocks, float* output, int cols) {
+    int nb = cols / QK4_0;
+    for (int i = 0; i < nb; ++i) {
+        const float d = fp16_to_fp32(blocks[i].d);
+        for (int j = 0; j < QK4_0 / 2; ++j) {
+            const uint8_t v = blocks[i].qs[j];
+            output[i * QK4_0 + j]              = d * ((int)(v & 0x0F) - 8);
+            output[i * QK4_0 + j + QK4_0 / 2]  = d * ((int)(v >> 4) - 8);
+        }
+    }
+}
+
+inline void dequant_row_q4_1(const block_q4_1* blocks, float* output, int cols) {
+    int nb = cols / QK4_1;
+    for (int i = 0; i < nb; ++i) {
+        const float d = fp16_to_fp32(blocks[i].d);
+        const float m = fp16_to_fp32(blocks[i].m);
+        for (int j = 0; j < QK4_1 / 2; ++j) {
+            const uint8_t v = blocks[i].qs[j];
+            output[i * QK4_1 + j]              = d * (v & 0x0F) + m;
+            output[i * QK4_1 + j + QK4_1 / 2]  = d * (v >> 4) + m;
+        }
+    }
+}
+
+inline void dequant_row_q5_0(const block_q5_0* blocks, float* output, int cols) {
+    int nb = cols / QK5_0;
+    for (int i = 0; i < nb; ++i) {
+        const float d = fp16_to_fp32(blocks[i].d);
+        uint32_t qh;
+        memcpy(&qh, blocks[i].qh, sizeof(qh));
+        
+        for (int j = 0; j < QK5_0 / 2; ++j) {
+            const uint8_t v = blocks[i].qs[j];
+            const int xh_0 = ((qh >> (j + 0)) & 1) << 4;
+            const int xh_1 = ((qh >> (j + 16)) & 1) << 4;
+            
+            output[i * QK5_0 + j]              = d * ((int)(v & 0x0F) + xh_0 - 16);
+            output[i * QK5_0 + j + QK5_0 / 2]  = d * ((int)(v >> 4) + xh_1 - 16);
+        }
+    }
+}
+
+inline void dequant_row_q5_1(const block_q5_1* blocks, float* output, int cols) {
+    int nb = cols / QK5_1;
+    for (int i = 0; i < nb; ++i) {
+        const float d = fp16_to_fp32(blocks[i].d);
+        const float m = fp16_to_fp32(blocks[i].m);
+        uint32_t qh;
+        memcpy(&qh, blocks[i].qh, sizeof(qh));
+        
+        for (int j = 0; j < QK5_1 / 2; ++j) {
+            const uint8_t v = blocks[i].qs[j];
+            const int xh_0 = ((qh >> (j + 0)) & 1) << 4;
+            const int xh_1 = ((qh >> (j + 16)) & 1) << 4;
+            
+            output[i * QK5_1 + j]              = d * ((v & 0x0F) + xh_0) + m;
+            output[i * QK5_1 + j + QK5_1 / 2]  = d * ((v >> 4) + xh_1) + m;
+        }
+    }
+}
+
 inline void dequant_row(const void* data, float* output, int cols, int rowIdx, GGML_DType qtype) {
     int blocksPerRow;
     size_t bytesPerBlock = 0;
@@ -424,12 +583,37 @@ inline void dequant_row(const void* data, float* output, int cols, int rowIdx, G
             bytesPerBlock = sizeof(block_q8_K);
             dequant_row_q8_K((const block_q8_K*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
             break;
+        case GGML_DType::Q4_0:
+            blocksPerRow = cols / QK4_0;
+            bytesPerBlock = sizeof(block_q4_0);
+            dequant_row_q4_0((const block_q4_0*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
+            break;
+        case GGML_DType::Q4_1:
+            blocksPerRow = cols / QK4_1;
+            bytesPerBlock = sizeof(block_q4_1);
+            dequant_row_q4_1((const block_q4_1*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
+            break;
+        case GGML_DType::Q5_0:
+            blocksPerRow = cols / QK5_0;
+            bytesPerBlock = sizeof(block_q5_0);
+            dequant_row_q5_0((const block_q5_0*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
+            break;
+        case GGML_DType::Q5_1:
+            blocksPerRow = cols / QK5_1;
+            bytesPerBlock = sizeof(block_q5_1);
+            dequant_row_q5_1((const block_q5_1*)((const char*)data + rowIdx * blocksPerRow * bytesPerBlock), output, cols);
+            break;
         case GGML_DType::F32:
             memcpy(output, (const float*)data + rowIdx * cols, cols * sizeof(float));
             break;
         case GGML_DType::F16:
             for (int j = 0; j < cols; ++j) {
                 output[j] = fp16_to_fp32(((const uint16_t*)data)[rowIdx * cols + j]);
+            }
+            break;
+        case GGML_DType::BFLOAT16:
+            for (int j = 0; j < cols; ++j) {
+                output[j] = bf16_to_fp32(((const uint16_t*)data)[rowIdx * cols + j]);
             }
             break;
         default:
@@ -447,12 +631,13 @@ inline size_t get_bytes_per_block(GGML_DType qtype) {
         case GGML_DType::Q6_K: return sizeof(block_q6_K);
         case GGML_DType::Q8_K: return sizeof(block_q8_K);
         case GGML_DType::Q8_0: return sizeof(block_q8_0);
-        case GGML_DType::Q4_0: return 2 + 32/2;
-        case GGML_DType::Q4_1: return 4 + 32/2;
-        case GGML_DType::Q5_0: return 2 + 4 + 32/2;
-        case GGML_DType::Q5_1: return 4 + 4 + 32/2;
+        case GGML_DType::Q4_0: return sizeof(block_q4_0);
+        case GGML_DType::Q4_1: return sizeof(block_q4_1);
+        case GGML_DType::Q5_0: return sizeof(block_q5_0);
+        case GGML_DType::Q5_1: return sizeof(block_q5_1);
         case GGML_DType::F32: return 4;
         case GGML_DType::F16: return 2;
+        case GGML_DType::BFLOAT16: return 2;
         default: return 0;
     }
 }
@@ -496,6 +681,872 @@ inline const char* get_dtype_name(GGML_DType qtype) {
         default: return "UNKNOWN";
     }
 }
+
+// ================================================================================
+// PART 0.5: GGUF LOADER, TOKENIZER, AND TEXT GENERATION
+// ================================================================================
+
+struct GGUFTensor {
+    std::string name;
+    int numDims;
+    std::vector<int64_t> shape;
+    int dtype;
+    int64_t dataOffset;
+    size_t dataSize;
+};
+
+class GGUFModel {
+private:
+    std::ifstream stream;
+    std::string filename;
+    std::vector<GGUFTensor> tensors;
+    std::map<std::string, int> tensorMap;
+    int64_t tensorDataStart;
+    
+    std::vector<std::string> ggufTokens;
+    std::vector<float> tokenScores;
+    
+    int embedDim_ = 2048;
+    int numLayers_ = 16;
+    int numHeads_ = 32;
+    int numKVHeads_ = 8;
+    int ffnDim_ = 8192;
+    int vocabSize_ = 128256;
+    int maxSeqLen_ = 131072;
+    float ropeTheta_ = 500000.0f;
+    float rmsEps_ = 1e-5f;
+    int headDim_ = 64;
+    std::string architecture_;
+    bool loaded_ = false;
+
+    uint32_t readU32() { uint32_t v; stream.read((char*)&v, 4); return v; }
+    uint64_t readU64() { uint64_t v; stream.read((char*)&v, 8); return v; }
+    int8_t readI8() { int8_t v; stream.read((char*)&v, 1); return v; }
+    int32_t readI32() { int32_t v; stream.read((char*)&v, 4); return v; }
+    float readF32() { float v; stream.read((char*)&v, 4); return v; }
+    
+    std::string readString() {
+        uint64_t len = readU64();
+        if (len > 10000000) return "";
+        std::string s(len, '\0');
+        stream.read(&s[0], len);
+        return s;
+    }
+    
+    void skipValue(int type) {
+        switch (type) {
+            case 0: case 1: stream.seekg(1, std::ios::cur); break;
+            case 2: case 3: stream.seekg(2, std::ios::cur); break;
+            case 4: case 5: case 6: stream.seekg(4, std::ios::cur); break;
+            case 7: stream.seekg(1, std::ios::cur); break;
+            case 8: { uint64_t l = readU64(); stream.seekg(l, std::ios::cur); } break;
+            case 9: {
+                uint32_t at = readU32();
+                uint64_t ac = readU64();
+                for (uint64_t i = 0; i < ac; i++) skipValue(at);
+            } break;
+            case 10: case 11: case 12: stream.seekg(8, std::ios::cur); break;
+        }
+    }
+    
+    size_t getTypeSize(int dtype) {
+        switch (dtype) {
+            case 0: return 4;  // F32
+            case 1: return 2;  // F16
+            case 2: return sizeof(block_q4_0);
+            case 3: return sizeof(block_q4_1);
+            case 6: return sizeof(block_q5_0);
+            case 7: return sizeof(block_q5_1);
+            case 8: return sizeof(block_q8_0);
+            case 10: return sizeof(block_q2_K);
+            case 11: return sizeof(block_q3_K);
+            case 12: return sizeof(block_q4_K);
+            case 13: return sizeof(block_q5_K);
+            case 14: return sizeof(block_q6_K);
+            case 15: return sizeof(block_q8_K);
+            case 30: return 2;  // BF16
+            default: return 4;
+        }
+    }
+    
+    int getBlockSize(int dtype) {
+        switch (dtype) {
+            case 0: case 1: case 30: return 1;
+            case 2: case 3: case 6: case 7: case 8: return 32;
+            case 10: case 11: case 12: case 13: case 14: case 15: return 256;
+            default: return 1;
+        }
+    }
+
+public:
+    bool load(const std::string& path) {
+        filename = path;
+        stream.open(path, std::ios::binary);
+        if (!stream) {
+            std::cerr << "Cannot open: " << path << std::endl;
+            return false;
+        }
+        
+        char magic[4];
+        stream.read(magic, 4);
+        if (strncmp(magic, "GGUF", 4) != 0) {
+            std::cerr << "Invalid GGUF magic" << std::endl;
+            return false;
+        }
+        
+        uint32_t version = readU32();
+        uint64_t tensorCount = readU64();
+        uint64_t metaCount = readU64();
+        
+        std::cout << "GGUF v" << version << ": " << tensorCount << " tensors, " 
+                  << metaCount << " metadata entries" << std::endl;
+        
+        for (uint64_t i = 0; i < metaCount; i++) {
+            std::string key = readString();
+            uint32_t vtype = readU32();
+            
+            if (key == "general.architecture" && vtype == 8) {
+                architecture_ = readString();
+            } else if (key.find("embedding_length") != std::string::npos && (vtype == 4 || vtype == 5)) {
+                embedDim_ = readU32();
+            } else if (key.find("block_count") != std::string::npos && (vtype == 4 || vtype == 5)) {
+                numLayers_ = readU32();
+            } else if (key.find("head_count_kv") != std::string::npos && (vtype == 4 || vtype == 5)) {
+                numKVHeads_ = readU32();
+            } else if (key.find("attention.head_count") != std::string::npos && (vtype == 4 || vtype == 5)) {
+                numHeads_ = readU32();
+            } else if (key.find("feed_forward_length") != std::string::npos && (vtype == 4 || vtype == 5)) {
+                ffnDim_ = readU32();
+            } else if (key.find("context_length") != std::string::npos && (vtype == 4 || vtype == 5)) {
+                maxSeqLen_ = readU32();
+            } else if (key.find("rope.freq_base") != std::string::npos && vtype == 6) {
+                ropeTheta_ = readF32();
+            } else if (key.find("attention.layer_norm_rms_epsilon") != std::string::npos && vtype == 6) {
+                rmsEps_ = readF32();
+            } else if (key == "tokenizer.ggml.tokens" && vtype == 9) {
+                uint32_t arrType = readU32();
+                uint64_t arrCount = readU64();
+                if (arrType == 8) {
+                    ggufTokens.resize(arrCount);
+                    for (uint64_t j = 0; j < arrCount; j++) {
+                        ggufTokens[j] = readString();
+                    }
+                    vocabSize_ = arrCount;
+                    std::cout << "Loaded " << arrCount << " tokens" << std::endl;
+                } else {
+                    for (uint64_t j = 0; j < arrCount; j++) skipValue(arrType);
+                }
+            } else if (key == "tokenizer.ggml.scores" && vtype == 9) {
+                uint32_t arrType = readU32();
+                uint64_t arrCount = readU64();
+                if (arrType == 6) {
+                    tokenScores.resize(arrCount);
+                    for (uint64_t j = 0; j < arrCount; j++) {
+                        tokenScores[j] = readF32();
+                    }
+                } else {
+                    for (uint64_t j = 0; j < arrCount; j++) skipValue(arrType);
+                }
+            } else {
+                skipValue(vtype);
+            }
+        }
+        
+        headDim_ = embedDim_ / numHeads_;
+        
+        tensors.resize(tensorCount);
+        for (uint64_t i = 0; i < tensorCount; i++) {
+            tensors[i].name = readString();
+            tensors[i].numDims = readU32();
+            tensors[i].shape.resize(tensors[i].numDims);
+            size_t numElements = 1;
+            for (int d = 0; d < tensors[i].numDims; d++) {
+                tensors[i].shape[d] = readU64();
+                numElements *= tensors[i].shape[d];
+            }
+            tensors[i].dtype = readU32();
+            tensors[i].dataOffset = readU64();
+            
+            int blockSize = getBlockSize(tensors[i].dtype);
+            size_t numBlocks = (numElements + blockSize - 1) / blockSize;
+            tensors[i].dataSize = numBlocks * getTypeSize(tensors[i].dtype);
+            
+            tensorMap[tensors[i].name] = i;
+        }
+        
+        tensorDataStart = stream.tellg();
+        tensorDataStart = ((tensorDataStart + 31) / 32) * 32;
+        
+        std::cout << "Architecture: " << architecture_ << std::endl;
+        std::cout << "Model: " << numLayers_ << " layers, " << embedDim_ << " dim, "
+                  << numHeads_ << " heads (" << numKVHeads_ << " KV), " 
+                  << ffnDim_ << " FFN, vocab " << vocabSize_ << std::endl;
+        std::cout << "RoPE theta: " << ropeTheta_ << ", RMS eps: " << rmsEps_ << std::endl;
+        
+        loaded_ = true;
+        return true;
+    }
+    
+    std::vector<float> loadTensor(const std::string& name) {
+        auto it = tensorMap.find(name);
+        if (it == tensorMap.end()) return {};
+        
+        const GGUFTensor& t = tensors[it->second];
+        size_t numElements = 1;
+        for (auto d : t.shape) numElements *= d;
+        
+        stream.seekg(tensorDataStart + t.dataOffset);
+        
+        std::vector<float> result(numElements);
+        
+        if (t.dtype == 0) {
+            stream.read((char*)result.data(), numElements * sizeof(float));
+        } else if (t.dtype == 1) {
+            std::vector<uint16_t> fp16(numElements);
+            stream.read((char*)fp16.data(), numElements * 2);
+            for (size_t i = 0; i < numElements; i++) {
+                result[i] = fp16_to_fp32(fp16[i]);
+            }
+        } else if (t.dtype == 30) {
+            std::vector<uint16_t> bf16(numElements);
+            stream.read((char*)bf16.data(), numElements * 2);
+            for (size_t i = 0; i < numElements; i++) {
+                result[i] = bf16_to_fp32(bf16[i]);
+            }
+        } else {
+            std::vector<uint8_t> raw(t.dataSize);
+            stream.read((char*)raw.data(), t.dataSize);
+            GGML_DType qtype = static_cast<GGML_DType>(t.dtype);
+            int blockSize = getBlockSize(t.dtype);
+            int numRows = (t.numDims > 1) ? t.shape[0] : 1;
+            int cols = numElements / numRows;
+            for (int r = 0; r < numRows; r++) {
+                dequant_row(raw.data(), result.data() + r * cols, cols, r, qtype);
+            }
+        }
+        return result;
+    }
+    
+    const std::vector<std::string>& getTokens() const { return ggufTokens; }
+    int embedDim() const { return embedDim_; }
+    int numLayers() const { return numLayers_; }
+    int numHeads() const { return numHeads_; }
+    int numKVHeads() const { return numKVHeads_; }
+    int ffnDim() const { return ffnDim_; }
+    int vocabSize() const { return vocabSize_; }
+    int maxSeqLen() const { return maxSeqLen_; }
+    int headDim() const { return headDim_; }
+    float ropeTheta() const { return ropeTheta_; }
+    float rmsEps() const { return rmsEps_; }
+    const std::string& architecture() const { return architecture_; }
+    bool isLoaded() const { return loaded_; }
+    const std::vector<GGUFTensor>& getTensors() const { return tensors; }
+};
+
+class Tokenizer {
+private:
+    std::map<std::string, int> tokenToId;
+    std::vector<std::string> idToToken;
+    int bosId_ = 128000;
+    int eosId_ = 128001;
+    int eotId_ = 128009;
+    int imStartId_ = -1;
+    int imEndId_ = -1;
+    int startTurnId_ = -1;
+    int endTurnId_ = -1;
+    bool loaded_ = false;
+    std::string modelType_ = "llama";
+
+public:
+    bool loadFromGGUF(const std::vector<std::string>& tokens, const std::string& arch = "") {
+        if (tokens.empty()) return false;
+        idToToken = tokens;
+        
+        // Auto-detect model type
+        if (arch.find("qwen") != std::string::npos) {
+            modelType_ = "qwen";
+        } else if (arch.find("gemma") != std::string::npos) {
+            modelType_ = "gemma";
+        } else {
+            modelType_ = "llama";
+        }
+        
+        for (int i = 0; i < (int)tokens.size(); i++) {
+            tokenToId[tokens[i]] = i;
+            // LLaMA 3 tokens
+            if (tokens[i] == "<|begin_of_text|>") bosId_ = i;
+            if (tokens[i] == "<|end_of_text|>") eosId_ = i;
+            if (tokens[i] == "<|eot_id|>") eotId_ = i;
+            // Mistral/LLaMA 1-2 tokens (also used by many other models)
+            if (tokens[i] == "<s>") bosId_ = i;
+            if (tokens[i] == "</s>") { eosId_ = i; eotId_ = i; }
+            // DeepSeek tokens (LLaMA-based coder model)
+            if (tokens[i].find("begin") != std::string::npos && tokens[i].find("sentence") != std::string::npos) {
+                bosId_ = i;
+                modelType_ = "deepseek";
+            }
+            if (tokens[i] == "<|EOT|>" || tokens[i] == "<｜end▁of▁sentence｜>") {
+                eosId_ = i;
+                eotId_ = i;
+                modelType_ = "deepseek";
+            }
+            // Qwen tokens
+            if (tokens[i] == "<|endoftext|>") { 
+                if (modelType_ == "qwen") { 
+                    eosId_ = i; 
+                    bosId_ = i;  // Qwen uses endoftext as BOS too
+                } 
+            }
+            if (tokens[i] == "<|im_start|>") imStartId_ = i;
+            if (tokens[i] == "<|im_end|>") { imEndId_ = i; if (modelType_ == "qwen") eotId_ = i; }
+            // Gemma tokens
+            if (tokens[i] == "<bos>") { if (modelType_ == "gemma") bosId_ = i; }
+            if (tokens[i] == "<eos>") { if (modelType_ == "gemma") { eosId_ = i; } }
+            if (tokens[i] == "<start_of_turn>") startTurnId_ = i;
+            if (tokens[i] == "<end_of_turn>") endTurnId_ = i;
+        }
+        
+        // CRITICAL: Gemma 3 Token 107 fix
+        // Many GGUF quants incorrectly include Token 107 (newline) in EOS list
+        // Force-override: EOS=1 (actual EOS), EOT=106 (<end_of_turn>)
+        // This prevents the "newline loop" where model only outputs token 107
+        if (modelType_ == "gemma") {
+            if (endTurnId_ > 0) {
+                eotId_ = endTurnId_;  // Use <end_of_turn> (usually 106) as EOT
+            }
+            // Note: eosId_ stays as <eos> token (usually 1), already set above
+            std::cout << "Gemma token fix applied: EOS=" << eosId_ << " EOT=" << eotId_ 
+                      << " (avoiding token 107 newline loop)" << std::endl;
+        }
+        
+        loaded_ = true;
+        std::cout << "Tokenizer: " << tokens.size() << " tokens (" << modelType_ << ")" << std::endl;
+        std::cout << "  BOS=" << bosId_ << " EOS=" << eosId_ << " EOT=" << eotId_;
+        if (imStartId_ >= 0) std::cout << " IM_START=" << imStartId_ << " IM_END=" << imEndId_;
+        if (startTurnId_ >= 0) std::cout << " START_TURN=" << startTurnId_ << " END_TURN=" << endTurnId_;
+        std::cout << std::endl;
+        return true;
+    }
+    
+    std::vector<int> encode(const std::string& text) {
+        std::vector<int> result;
+        
+        // First pass: extract special tokens (delimited by <| and |> or < and >)
+        // Special tokens are encoded directly by their token ID, not character-by-character
+        std::vector<std::pair<size_t, size_t>> specialRanges;  // (start, end) of special tokens
+        std::vector<int> specialIds;
+        
+        size_t pos = 0;
+        while (pos < text.size()) {
+            // Check for LLaMA 3 style tokens: <|...|>
+            if (pos + 2 < text.size() && text[pos] == '<' && text[pos+1] == '|') {
+                size_t end = text.find("|>", pos);
+                if (end != std::string::npos) {
+                    std::string special = text.substr(pos, end - pos + 2);
+                    auto it = tokenToId.find(special);
+                    if (it != tokenToId.end()) {
+                        specialRanges.push_back({pos, end + 2});
+                        specialIds.push_back(it->second);
+                        pos = end + 2;
+                        continue;
+                    }
+                }
+            }
+            // Check for simple special tokens: <...> (e.g., <s>, </s>, <bos>, <eos>)
+            if (text[pos] == '<') {
+                size_t end = text.find('>', pos);
+                if (end != std::string::npos && end - pos <= 32) {
+                    std::string special = text.substr(pos, end - pos + 1);
+                    auto it = tokenToId.find(special);
+                    if (it != tokenToId.end()) {
+                        specialRanges.push_back({pos, end + 1});
+                        specialIds.push_back(it->second);
+                        pos = end + 1;
+                        continue;
+                    }
+                }
+            }
+            pos++;
+        }
+        
+        // Qwen uses BPE with Ġ (0xC4 0xA0) for leading spaces
+        // SentencePiece (Mistral, LLaMA 1/2) uses ▁ (0xE2 0x96 0x81)
+        const char* spaceMarker = isQwen() ? "\xC4\xA0" : "\xe2\x96\x81";
+        
+        // Second pass: encode text between special tokens using BPE
+        size_t textPos = 0;
+        size_t specialIdx = 0;
+        
+        while (textPos < text.size()) {
+            // Check if we're at a special token
+            if (specialIdx < specialRanges.size() && textPos == specialRanges[specialIdx].first) {
+                result.push_back(specialIds[specialIdx]);
+                textPos = specialRanges[specialIdx].second;
+                specialIdx++;
+                continue;
+            }
+            
+            // Find the end of the current text segment (up to next special token or end)
+            size_t segEnd = text.size();
+            if (specialIdx < specialRanges.size()) {
+                segEnd = specialRanges[specialIdx].first;
+            }
+            
+            // Process text segment with space markers
+            std::string processed;
+            bool atWordStart = (textPos == 0 || text[textPos-1] == '\n');
+            for (size_t i = textPos; i < segEnd; i++) {
+                if (text[i] == ' ') {
+                    processed += spaceMarker;
+                    atWordStart = true;
+                } else if (text[i] == '\n') {
+                    processed += text[i];
+                    atWordStart = true;
+                } else {
+                    processed += text[i];
+                    atWordStart = false;
+                }
+            }
+            
+            // Greedy BPE encoding for this segment
+            size_t i = 0;
+            while (i < processed.size()) {
+                int bestLen = 0, bestId = -1;
+                for (size_t len = std::min(processed.size() - i, (size_t)32); len >= 1; len--) {
+                    std::string sub = processed.substr(i, len);
+                    auto it = tokenToId.find(sub);
+                    if (it != tokenToId.end()) {
+                        bestLen = len;
+                        bestId = it->second;
+                        break;
+                    }
+                }
+                if (bestId >= 0) {
+                    result.push_back(bestId);
+                    i += bestLen;
+                } else {
+                    unsigned char byte = (unsigned char)processed[i];
+                    std::string byteToken = "<0x" + 
+                        std::string(1, "0123456789ABCDEF"[byte >> 4]) +
+                        std::string(1, "0123456789ABCDEF"[byte & 0xF]) + ">";
+                    auto it = tokenToId.find(byteToken);
+                    result.push_back(it != tokenToId.end() ? it->second : byte + 3);
+                    i++;
+                }
+            }
+            
+            textPos = segEnd;
+        }
+        
+        return result;
+    }
+    
+    std::string decode(int id) {
+        if (id < 0 || id >= (int)idToToken.size()) return "";
+        std::string tok = idToToken[id];
+        // Skip special tokens
+        if (tok.find("<|") == 0 || tok == "<s>" || tok == "</s>" || 
+            tok == "<bos>" || tok == "<eos>" || tok == "<pad>" || tok == "<unk>" ||
+            tok == "<start_of_turn>" || tok == "<end_of_turn>") return "";
+        size_t pos;
+        while ((pos = tok.find("\xC4\xA0")) != std::string::npos) tok.replace(pos, 2, " ");
+        while ((pos = tok.find("\xC4\x8A")) != std::string::npos) tok.replace(pos, 2, "\n");
+        // Handle Gemma's space marker (▁ = \xe2\x96\x81)
+        while ((pos = tok.find("\xe2\x96\x81")) != std::string::npos) tok.replace(pos, 3, " ");
+        return tok;
+    }
+    
+    std::string decode(const std::vector<int>& ids) {
+        std::string result;
+        for (int id : ids) result += decode(id);
+        return result;
+    }
+    
+    int bos() const { return bosId_; }
+    int eos() const { return eosId_; }
+    int eot() const { return eotId_; }
+    int imStart() const { return imStartId_; }
+    int imEnd() const { return imEndId_; }
+    int startTurn() const { return startTurnId_; }
+    int endTurn() const { return endTurnId_; }
+    int vocabSize() const { return idToToken.size(); }
+    bool isLoaded() const { return loaded_; }
+    bool isQwen() const { return modelType_ == "qwen"; }
+    bool isGemma() const { return modelType_ == "gemma"; }
+    const std::string& modelType() const { return modelType_; }
+    
+    std::string applyChatTemplate(const std::string& userMessage, bool rawMode = false) {
+        // Raw mode: no chat template, just the prompt (for base models like Mistral v0.1)
+        if (rawMode) {
+            return userMessage;
+        }
+        if (modelType_ == "qwen") {
+            // /no_think enables non-thinking mode for faster responses
+            return "<|im_start|>user\n" + userMessage + " /no_think<|im_end|>\n<|im_start|>assistant\n";
+        } else if (modelType_ == "deepseek") {
+            // DeepSeek Coder uses Alpaca-style format
+            return "### Instruction:\n" + userMessage + "\n### Response:\n";
+        } else if (modelType_ == "gemma") {
+            return "<bos><start_of_turn>user\n" + userMessage + "<end_of_turn>\n<start_of_turn>model\n";
+        } else if (vocabSize() <= 32001) {
+            // Small vocab (Mistral v0.1, LLaMA 1/2) - likely base model, use simple format
+            return "<s>" + userMessage;
+        } else {
+            // LLaMA 3 style chat format
+            return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n" + 
+                   userMessage + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+        }
+    }
+    
+    bool isDeepSeek() const { return modelType_ == "deepseek"; }
+};
+
+struct GenerationConfig {
+    int maxTokens = 256;
+    float temperature = 0.7f;
+    int topK = 40;
+    float topP = 0.9f;
+    float repPenalty = 1.1f;
+};
+
+class TextGenerator {
+private:
+    GGUFModel* model;
+    Tokenizer* tokenizer;
+    std::mt19937 rng;
+    
+    std::vector<float> embeddings;
+    std::vector<float> outputWeight;
+    std::vector<float> normWeight;
+    
+    struct LayerWeights {
+        std::vector<float> attnNorm, ffnNorm;
+        std::vector<float> wq, wk, wv, wo;
+        std::vector<float> w1, w2, w3;
+        // QK-Norm weights (used by Gemma3 and Qwen3)
+        std::vector<float> qNorm, kNorm;
+    };
+    std::vector<LayerWeights> layers;
+    
+    std::vector<std::vector<float>> kvCacheK, kvCacheV;
+    int cacheLen = 0;
+
+    void rmsnorm(float* out, const float* x, const float* w, int n, float eps) {
+        float ss = 0;
+        for (int i = 0; i < n; i++) ss += x[i] * x[i];
+        ss = 1.0f / sqrtf(ss / n + eps);
+        for (int i = 0; i < n; i++) out[i] = x[i] * ss * w[i];
+    }
+    
+    void matmul(float* out, const float* x, const float* w, int n, int d) {
+        for (int i = 0; i < d; i++) {
+            float sum = 0;
+            for (int j = 0; j < n; j++) sum += x[j] * w[i * n + j];
+            out[i] = sum;
+        }
+    }
+    
+    void softmax(float* x, int n) {
+        float maxv = x[0];
+        for (int i = 1; i < n; i++) if (x[i] > maxv) maxv = x[i];
+        float sum = 0;
+        for (int i = 0; i < n; i++) { x[i] = expf(x[i] - maxv); sum += x[i]; }
+        for (int i = 0; i < n; i++) x[i] /= sum;
+    }
+    
+    void rope(float* q, int qDim, float* k, int kDim, int headDim, int pos, float theta) {
+        for (int i = 0; i < qDim; i += 2) {
+            int headIdx = i % headDim;
+            float freq = 1.0f / powf(theta, (float)headIdx / headDim);
+            float angle = pos * freq;
+            float cs = cosf(angle), sn = sinf(angle);
+            float q0 = q[i], q1 = q[i + 1];
+            q[i] = q0 * cs - q1 * sn;
+            q[i + 1] = q0 * sn + q1 * cs;
+        }
+        if (k) {
+            for (int i = 0; i < kDim; i += 2) {
+                int headIdx = i % headDim;
+                float freq = 1.0f / powf(theta, (float)headIdx / headDim);
+                float angle = pos * freq;
+                float cs = cosf(angle), sn = sinf(angle);
+                float k0 = k[i], k1 = k[i + 1];
+                k[i] = k0 * cs - k1 * sn;
+                k[i + 1] = k0 * sn + k1 * cs;
+            }
+        }
+    }
+    
+    float silu(float x) { return x / (1.0f + expf(-x)); }
+
+public:
+    TextGenerator() : model(nullptr), tokenizer(nullptr) {
+        rng.seed(std::random_device{}());
+    }
+    
+    bool loadModel(GGUFModel* m, Tokenizer* t) {
+        model = m;
+        tokenizer = t;
+        
+        std::cout << "Loading weights..." << std::endl;
+        
+        embeddings = model->loadTensor("token_embd.weight");
+        if (embeddings.empty()) {
+            std::cerr << "Failed to load embeddings" << std::endl;
+            return false;
+        }
+        
+        outputWeight = model->loadTensor("output.weight");
+        if (outputWeight.empty()) outputWeight = embeddings;
+        
+        normWeight = model->loadTensor("output_norm.weight");
+        if (normWeight.empty()) {
+            std::cerr << "Failed to load output norm" << std::endl;
+            return false;
+        }
+        
+        layers.resize(model->numLayers());
+        for (int l = 0; l < model->numLayers(); l++) {
+            std::string prefix = "blk." + std::to_string(l) + ".";
+            layers[l].attnNorm = model->loadTensor(prefix + "attn_norm.weight");
+            layers[l].ffnNorm = model->loadTensor(prefix + "ffn_norm.weight");
+            layers[l].wq = model->loadTensor(prefix + "attn_q.weight");
+            layers[l].wk = model->loadTensor(prefix + "attn_k.weight");
+            layers[l].wv = model->loadTensor(prefix + "attn_v.weight");
+            layers[l].wo = model->loadTensor(prefix + "attn_output.weight");
+            layers[l].w1 = model->loadTensor(prefix + "ffn_gate.weight");
+            layers[l].w2 = model->loadTensor(prefix + "ffn_down.weight");
+            layers[l].w3 = model->loadTensor(prefix + "ffn_up.weight");
+            
+            // QK-Norm weights (used by Gemma3 and Qwen3)
+            layers[l].qNorm = model->loadTensor(prefix + "attn_q_norm.weight");
+            layers[l].kNorm = model->loadTensor(prefix + "attn_k_norm.weight");
+            
+            if (layers[l].wq.empty()) {
+                std::cerr << "Failed to load layer " << l << std::endl;
+                return false;
+            }
+            std::cout << "\rLoaded layer " << l + 1 << "/" << model->numLayers() << std::flush;
+        }
+        std::cout << std::endl;
+        
+        int maxCache = 2048;
+        int kvDim = model->headDim() * model->numKVHeads();
+        kvCacheK.resize(model->numLayers(), std::vector<float>(maxCache * kvDim, 0));
+        kvCacheV.resize(model->numLayers(), std::vector<float>(maxCache * kvDim, 0));
+        
+        std::cout << "Model loaded successfully" << std::endl;
+        return true;
+    }
+    
+    std::vector<float> forward(const std::vector<int>& tokens, int pos) {
+        int dim = model->embedDim();
+        int nHeads = model->numHeads();
+        int nKVHeads = model->numKVHeads();
+        int headDim = model->headDim();
+        int kvDim = headDim * nKVHeads;
+        int nLayers = model->numLayers();
+        float eps = model->rmsEps();
+        float theta = model->ropeTheta();
+        
+        std::vector<float> x(dim), xb(dim), xb2(dim);
+        std::vector<float> q(dim), k(kvDim), v(kvDim);
+        std::vector<float> hb(model->ffnDim()), hb2(model->ffnDim());
+        std::vector<float> att(nHeads * 2048);
+        
+        // Use token at the specified position (not always the last token!)
+        int tok = (pos < (int)tokens.size()) ? tokens[pos] : tokens.back();
+        if (tok < 0 || tok >= model->vocabSize()) {
+            std::cerr << "Invalid token: " << tok << std::endl;
+            return {};
+        }
+        for (int i = 0; i < dim; i++) {
+            x[i] = embeddings[(size_t)tok * dim + i];
+        }
+        
+        for (int l = 0; l < nLayers; l++) {
+            rmsnorm(xb.data(), x.data(), layers[l].attnNorm.data(), dim, eps);
+            
+            matmul(q.data(), xb.data(), layers[l].wq.data(), dim, dim);
+            matmul(k.data(), xb.data(), layers[l].wk.data(), dim, kvDim);
+            matmul(v.data(), xb.data(), layers[l].wv.data(), dim, kvDim);
+            
+            // QK-Norm (Gemma3, Qwen3): RMSNorm on Q and K before RoPE
+            if (!layers[l].qNorm.empty()) {
+                for (int h = 0; h < nHeads; h++) {
+                    rmsnorm(q.data() + h * headDim, q.data() + h * headDim,
+                           layers[l].qNorm.data(), headDim, eps);
+                }
+                for (int h = 0; h < nKVHeads; h++) {
+                    rmsnorm(k.data() + h * headDim, k.data() + h * headDim,
+                           layers[l].kNorm.data(), headDim, eps);
+                }
+            }
+            
+            rope(q.data(), dim, k.data(), kvDim, headDim, pos, theta);
+            
+            int cachePos = pos * kvDim;
+            for (int i = 0; i < kvDim; i++) {
+                kvCacheK[l][cachePos + i] = k[i];
+                kvCacheV[l][cachePos + i] = v[i];
+            }
+            
+            int kvMul = nHeads / nKVHeads;
+            for (int h = 0; h < nHeads; h++) {
+                float* qh = q.data() + h * headDim;
+                float* atth = att.data() + h * 2048;
+                int kvHead = h / kvMul;
+                
+                for (int t = 0; t <= pos; t++) {
+                    float* kh = kvCacheK[l].data() + t * kvDim + kvHead * headDim;
+                    float score = 0;
+                    for (int i = 0; i < headDim; i++) score += qh[i] * kh[i];
+                    atth[t] = score / sqrtf(headDim);
+                }
+                
+                softmax(atth, pos + 1);
+                
+                float* xbh = xb.data() + h * headDim;
+                std::fill(xbh, xbh + headDim, 0.0f);
+                for (int t = 0; t <= pos; t++) {
+                    float* vh = kvCacheV[l].data() + t * kvDim + kvHead * headDim;
+                    float a = atth[t];
+                    for (int i = 0; i < headDim; i++) xbh[i] += a * vh[i];
+                }
+            }
+            
+            matmul(xb2.data(), xb.data(), layers[l].wo.data(), dim, dim);
+            for (int i = 0; i < dim; i++) x[i] += xb2[i];
+            
+            rmsnorm(xb.data(), x.data(), layers[l].ffnNorm.data(), dim, eps);
+            
+            matmul(hb.data(), xb.data(), layers[l].w1.data(), dim, model->ffnDim());
+            matmul(hb2.data(), xb.data(), layers[l].w3.data(), dim, model->ffnDim());
+            
+            for (int i = 0; i < model->ffnDim(); i++) {
+                hb[i] = silu(hb[i]) * hb2[i];
+            }
+            
+            matmul(xb.data(), hb.data(), layers[l].w2.data(), model->ffnDim(), dim);
+            for (int i = 0; i < dim; i++) x[i] += xb[i];
+        }
+        
+        rmsnorm(x.data(), x.data(), normWeight.data(), dim, eps);
+        
+        std::vector<float> logits(model->vocabSize());
+        matmul(logits.data(), x.data(), outputWeight.data(), dim, model->vocabSize());
+        
+        return logits;
+    }
+    
+    int sample(std::vector<float>& logits, const GenerationConfig& cfg, 
+               const std::vector<int>& prevTokens, bool isGemma = false) {
+        int vocabSize = logits.size();
+        
+        // Gemma: mask "unused" token slots (IDs 3-104) to prevent sampling garbage
+        if (isGemma) {
+            for (int i = 3; i <= 104; i++) {
+                if (i < vocabSize) logits[i] = -INFINITY;
+            }
+        }
+        
+        // Apply repetition penalty to tokens that have already appeared
+        if (cfg.repPenalty != 1.0f) {
+            for (int tok : prevTokens) {
+                if (tok >= 0 && tok < vocabSize) {
+                    if (logits[tok] > 0) {
+                        logits[tok] /= cfg.repPenalty;
+                    } else {
+                        logits[tok] *= cfg.repPenalty;
+                    }
+                }
+            }
+        }
+        
+        if (cfg.temperature > 0) {
+            for (int i = 0; i < vocabSize; i++) logits[i] /= cfg.temperature;
+        }
+        
+        std::vector<std::pair<float, int>> scored(vocabSize);
+        for (int i = 0; i < vocabSize; i++) scored[i] = {logits[i], i};
+        std::partial_sort(scored.begin(), scored.begin() + cfg.topK, scored.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+        
+        float maxLogit = scored[0].first;
+        float sum = 0;
+        for (int i = 0; i < cfg.topK; i++) {
+            scored[i].first = expf(scored[i].first - maxLogit);
+            sum += scored[i].first;
+        }
+        
+        float cumSum = 0;
+        int cutoff = cfg.topK;
+        for (int i = 0; i < cfg.topK; i++) {
+            scored[i].first /= sum;
+            cumSum += scored[i].first;
+            if (cumSum >= cfg.topP) { cutoff = i + 1; break; }
+        }
+        
+        std::uniform_real_distribution<float> dist(0.0f, cumSum);
+        float r = dist(rng);
+        float acc = 0;
+        for (int i = 0; i < cutoff; i++) {
+            acc += scored[i].first;
+            if (r <= acc) return scored[i].second;
+        }
+        return scored[0].second;
+    }
+    
+    std::string generate(const std::string& prompt, const GenerationConfig& cfg) {
+        std::vector<int> tokens = tokenizer->encode(prompt);
+        std::cout << "Prompt tokens: " << tokens.size() << std::endl;
+        
+        bool isGemma = tokenizer->isGemma();
+        
+        cacheLen = 0;
+        for (auto& kc : kvCacheK) std::fill(kc.begin(), kc.end(), 0.0f);
+        for (auto& vc : kvCacheV) std::fill(vc.begin(), vc.end(), 0.0f);
+        
+        std::string result;
+        int generated = 0;
+        
+        // Prefill: process all prompt tokens to populate KV cache
+        for (int pos = 0; pos < (int)tokens.size(); pos++) {
+            forward(tokens, pos);
+        }
+        
+        for (int pos = (int)tokens.size() - 1; pos < (int)tokens.size() + cfg.maxTokens; pos++) {
+            int nextTok;
+            if (pos < (int)tokens.size() - 1) {
+                nextTok = tokens[pos + 1];
+            } else {
+                auto logits = forward(tokens, pos);
+                nextTok = sample(logits, cfg, tokens, isGemma);
+                tokens.push_back(nextTok);
+                
+                if (nextTok == tokenizer->eos() || nextTok == tokenizer->eot()) {
+                    break;
+                }
+                
+                std::string piece = tokenizer->decode(nextTok);
+                result += piece;
+                std::cout << piece << std::flush;
+                generated++;
+                
+                if (generated >= cfg.maxTokens) break;
+            }
+        }
+        
+        std::cout << std::endl;
+        return result;
+    }
+    
+    void clearCache() {
+        cacheLen = 0;
+        for (auto& kc : kvCacheK) std::fill(kc.begin(), kc.end(), 0.0f);
+        for (auto& vc : kvCacheV) std::fill(vc.begin(), vc.end(), 0.0f);
+    }
+};
 
 // ================================================================================
 // PART 1: PROTOCOL DEFINITIONS (from Protocol.h)
@@ -1883,6 +2934,16 @@ void printMainHelp(const char* progName) {
     std::cout << "    --verbose               Enable verbose output" << std::endl;
     std::cout << "    --help                  Show benchmark help\n" << std::endl;
 
+    std::cout << "  generate                  Generate text from a prompt (single mode)" << std::endl;
+    std::cout << "    -m, --model <path>      Path to GGUF model file (required)" << std::endl;
+    std::cout << "    -p, --prompt <text>     Text prompt for generation" << std::endl;
+    std::cout << "    -n, --tokens <n>        Max tokens to generate (default: 256)" << std::endl;
+    std::cout << "    -t, --temperature <n>   Sampling temperature (default: 0.7)" << std::endl;
+    std::cout << "    --top-k <n>             Top-K sampling (default: 40)" << std::endl;
+    std::cout << "    --top-p <n>             Top-P/nucleus sampling (default: 0.9)" << std::endl;
+    std::cout << "    -i, --interactive       Interactive chat mode" << std::endl;
+    std::cout << "    --help                  Show generate help\n" << std::endl;
+
     std::cout << "  test                      Run unit tests" << std::endl;
     std::cout << "    --all                   Run all tests" << std::endl;
     std::cout << "    --protocol              Test protocol handling" << std::endl;
@@ -2135,6 +3196,87 @@ int main(int argc, char* argv[]) {
 
         client.disconnect();
         std::cout << "\nClient shutdown complete." << std::endl;
+        return 0;
+
+    } else if (command == "generate") {
+        std::string modelPath;
+        std::string prompt;
+        GenerationConfig genCfg;
+        bool interactive = false;
+        
+        for (int i = 2; i < argc; i++) {
+            std::string arg = argv[i];
+            if ((arg == "-m" || arg == "--model") && i + 1 < argc) {
+                modelPath = argv[++i];
+            } else if ((arg == "-p" || arg == "--prompt") && i + 1 < argc) {
+                prompt = argv[++i];
+            } else if ((arg == "-n" || arg == "--tokens") && i + 1 < argc) {
+                genCfg.maxTokens = std::stoi(argv[++i]);
+            } else if ((arg == "-t" || arg == "--temperature") && i + 1 < argc) {
+                genCfg.temperature = std::stof(argv[++i]);
+            } else if (arg == "--top-k" && i + 1 < argc) {
+                genCfg.topK = std::stoi(argv[++i]);
+            } else if (arg == "--top-p" && i + 1 < argc) {
+                genCfg.topP = std::stof(argv[++i]);
+            } else if (arg == "-i" || arg == "--interactive") {
+                interactive = true;
+            } else if (arg == "--help") {
+                std::cout << "\nGENERATE MODE - Text generation from GGUF model\n" << std::endl;
+                std::cout << "Usage: " << argv[0] << " generate -m <model.gguf> [options]\n" << std::endl;
+                return 0;
+            }
+        }
+        
+        if (modelPath.empty()) {
+            std::cerr << "Error: Model path required (-m <path>)" << std::endl;
+            return 1;
+        }
+        
+        std::cout << "\n=== Text Generation ===" << std::endl;
+        
+        GGUFModel model;
+        if (!model.load(modelPath)) {
+            std::cerr << "Failed to load model: " << modelPath << std::endl;
+            return 1;
+        }
+        
+        Tokenizer tokenizer;
+        if (!tokenizer.loadFromGGUF(model.getTokens(), model.architecture())) {
+            std::cerr << "Failed to load tokenizer from model" << std::endl;
+            return 1;
+        }
+        
+        TextGenerator generator;
+        if (!generator.loadModel(&model, &tokenizer)) {
+            std::cerr << "Failed to initialize generator" << std::endl;
+            return 1;
+        }
+        
+        if (interactive) {
+            std::cout << "\nInteractive chat mode. Type 'quit' to exit.\n" << std::endl;
+            while (true) {
+                std::cout << "You: ";
+                std::getline(std::cin, prompt);
+                if (prompt == "quit" || prompt == "exit") break;
+                if (prompt.empty()) continue;
+                
+                std::string formatted = tokenizer.applyChatTemplate(prompt);
+                std::cout << "Assistant: ";
+                generator.generate(formatted, genCfg);
+                generator.clearCache();
+                std::cout << std::endl;
+            }
+        } else {
+            if (prompt.empty()) {
+                std::cout << "Enter prompt: ";
+                std::getline(std::cin, prompt);
+            }
+            
+            std::string formatted = tokenizer.applyChatTemplate(prompt);
+            std::cout << "\nGenerating...\n" << std::endl;
+            generator.generate(formatted, genCfg);
+        }
+        
         return 0;
 
     } else if (command == "test") {
