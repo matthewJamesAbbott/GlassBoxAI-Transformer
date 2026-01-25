@@ -35,18 +35,19 @@ This project demonstrates enterprise-grade software engineering practices includ
 ## **Table of Contents**
 
 1. [Features](#features)
-2. [Architecture](#architecture)
-3. [File Structure](#file-structure)
-4. [Prerequisites](#prerequisites)
-5. [Installation & Compilation](#installation--compilation)
-6. [CLI Reference](#cli-reference)
+2. [Supported Models](#supported-models)
+3. [Architecture](#architecture)
+4. [File Structure](#file-structure)
+5. [Prerequisites](#prerequisites)
+6. [Installation & Compilation](#installation--compilation)
+7. [CLI Reference](#cli-reference)
    - [Standard Transformer Commands](#standard-transformer-commands)
    - [Facade Transformer Commands](#facade-transformer-commands)
-7. [Testing](#testing)
-8. [Formal Verification with Kani](#formal-verification-with-kani)
-9. [CISA/NSA Compliance](#cisansa-compliance)
-10. [License](#license)
-11. [Author](#author)
+8. [Testing](#testing)
+9. [Formal Verification with Kani](#formal-verification-with-kani)
+10. [CISA/NSA Compliance](#cisansa-compliance)
+11. [License](#license)
+12. [Author](#author)
 
 ---
 
@@ -103,6 +104,20 @@ This project demonstrates enterprise-grade software engineering practices includ
 | **Q4_K** | 4.5 | 4-bit K-quant (recommended) | ✅ Full support |
 | **Q3_K** | 3.4 | 3-bit K-quant | ✅ Full support |
 | **Q2_K** | 2.6 | 2-bit K-quant | ⚠️ Experimental |
+
+### Supported Models
+
+GlassBoxAI-Transformer supports GGUF models from the llama.cpp ecosystem. Compatible model families include:
+
+| Model Family | Versions | Notes |
+|--------------|----------|-------|
+| **Llama** | Llama 2, Llama 3, Llama 3.1, Llama 3.2 | Full support including all quantizations |
+| **Mistral** | Mistral 7B, Mixtral 8x7B | MoE architectures supported |
+| **Qwen** | Qwen 1.5, Qwen 2, Qwen 2.5 | Including coder and chat variants |
+| **DeepSeek** | DeepSeek v1, DeepSeek v2 | ⚠️ DeepSeek v3 not yet supported |
+| **Unsloth** | All Unsloth fine-tuned models | Optimized GGUF exports from Unsloth |
+
+> **Note**: Models must be in GGUF format. Convert other formats using `llama.cpp`'s `convert.py` or download pre-quantized models from HuggingFace.
 
 ### Safety & Security
 
