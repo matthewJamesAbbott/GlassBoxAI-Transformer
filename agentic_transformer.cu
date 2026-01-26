@@ -2404,6 +2404,7 @@ inline void computeQKV_quantized(const float* normInput,
                                   float* Q, float* K, float* V,
                                   int seqLen, int embedDim, int numKVHeads, int numHeads, int headDim,
                                   float* tempBuffer, DeviceType device) {
+    (void)tempBuffer;
     // Q: [seqLen, embedDim] @ [embedDim, numHeads*headDim] -> [seqLen, numHeads*headDim]
     // K: [seqLen, embedDim] @ [embedDim, numKVHeads*headDim] -> [seqLen, numKVHeads*headDim]
     // V: [seqLen, embedDim] @ [embedDim, numKVHeads*headDim] -> [seqLen, numKVHeads*headDim]
@@ -2436,7 +2437,6 @@ inline void projection_quantized(const float* input, const QuantizedTensor* weig
         }
     } else {
         // GPU: Simple kernel to add residual
-        dim3 block(256);
         dim3 grid((seqLen * embedDim + 255) / 256);
         // Note: Using a simple add kernel (need to add this kernel if not present)
         // For now, copy back to CPU, add, copy back (not efficient but works)
@@ -4162,6 +4162,7 @@ public:
     }
     
     bool dequantizeK_CPU(const uint8_t* data, float* output, int64_t numElements, GGML_DType dtype) {
+        (void)data; (void)dtype;
         // K-quant formats are more complex - simplified implementation
         // For now, just zero-fill as placeholder
         std::fill(output, output + numElements, 0.0f);
@@ -5677,6 +5678,7 @@ public:
     
     // Action: List Tensors
     ActionResult actionListTensors(int limit = 0) {
+        (void)limit;
         ActionResult result;
         result.actionType = "LIST_TENSORS";
         result.timestamp = std::chrono::high_resolution_clock::now();

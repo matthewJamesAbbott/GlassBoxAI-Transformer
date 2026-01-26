@@ -148,27 +148,29 @@ mod arithmetic_proofs {
     /// Verify bytes_per_block is defined for division operations
     #[kani::proof]
     fn verify_bytes_per_block_safe_for_division() {
-        let valid_types = [
-            GGMLDType::Q2_K,
-            GGMLDType::Q3_K,
-            GGMLDType::Q4_K,
-            GGMLDType::Q5_K,
-            GGMLDType::Q6_K,
-            GGMLDType::Q8_K,
-            GGMLDType::Q8_0,
-            GGMLDType::Q4_0,
-            GGMLDType::Q4_1,
-            GGMLDType::Q5_0,
-            GGMLDType::Q5_1,
-            GGMLDType::F32,
-            GGMLDType::F16,
-            GGMLDType::BFloat16,
-        ];
+        // Use symbolic selection instead of loop to avoid unwind issues
+        let dtype_idx: u8 = kani::any();
+        kani::assume(dtype_idx < 14);
         
-        for dtype in valid_types {
-            let bytes = get_bytes_per_block(dtype);
-            kani::assert(bytes > 0, "Bytes per block non-zero for valid types");
-        }
+        let dtype = match dtype_idx {
+            0 => GGMLDType::Q2_K,
+            1 => GGMLDType::Q3_K,
+            2 => GGMLDType::Q4_K,
+            3 => GGMLDType::Q5_K,
+            4 => GGMLDType::Q6_K,
+            5 => GGMLDType::Q8_K,
+            6 => GGMLDType::Q8_0,
+            7 => GGMLDType::Q4_0,
+            8 => GGMLDType::Q4_1,
+            9 => GGMLDType::Q5_0,
+            10 => GGMLDType::Q5_1,
+            11 => GGMLDType::F32,
+            12 => GGMLDType::F16,
+            _ => GGMLDType::BFloat16,
+        };
+        
+        let bytes = get_bytes_per_block(dtype);
+        kani::assert(bytes > 0, "Bytes per block non-zero for valid types");
     }
 
     /// Verify vocabulary size is non-zero before division

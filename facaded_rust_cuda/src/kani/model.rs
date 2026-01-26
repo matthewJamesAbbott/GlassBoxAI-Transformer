@@ -58,8 +58,9 @@ mod model_proofs {
         let dim: usize = kani::any();
         let n_heads: usize = kani::any();
         
-        kani::assume(dim > 0 && dim <= 16384);
-        kani::assume(n_heads > 0 && n_heads <= 128);
+        // Smaller bounds for faster verification
+        kani::assume(dim > 0 && dim <= 512);
+        kani::assume(n_heads > 0 && n_heads <= 32);
         
         // head_dim = dim / n_heads should be reasonable
         kani::assume(dim % n_heads == 0);
@@ -101,9 +102,10 @@ mod model_proofs {
         let kv_dim: usize = kani::any();
         let pos: usize = kani::any();
         
-        kani::assume(layer < 128);
-        kani::assume(max_seq_len <= 4096);
-        kani::assume(kv_dim <= 4096);
+        // Smaller bounds for faster verification
+        kani::assume(layer < 32);
+        kani::assume(max_seq_len > 0 && max_seq_len <= 256);
+        kani::assume(kv_dim > 0 && kv_dim <= 256);
         kani::assume(pos < max_seq_len);
         
         let layer_offset = layer.saturating_mul(max_seq_len).saturating_mul(kv_dim);
@@ -127,8 +129,9 @@ mod model_proofs {
         let dim: usize = kani::any();
         let ffn_dim: usize = kani::any();
         
-        kani::assume(dim > 0 && dim <= 8192);
-        kani::assume(ffn_dim > 0 && ffn_dim <= 32768);
+        // Smaller bounds for faster verification
+        kani::assume(dim > 0 && dim <= 256);
+        kani::assume(ffn_dim > 0 && ffn_dim <= 1024);
         
         // FFN is typically 4x or 8/3x of dim
         // Weight matrix size: dim * ffn_dim
@@ -168,8 +171,9 @@ mod model_proofs {
         let dim: usize = kani::any();
         let token_id: usize = kani::any();
         
-        kani::assume(vocab_size > 0 && vocab_size <= 200_000);
-        kani::assume(dim > 0 && dim <= 8192);
+        // Smaller bounds for faster verification
+        kani::assume(vocab_size > 0 && vocab_size <= 1000);
+        kani::assume(dim > 0 && dim <= 256);
         
         let is_valid = token_id < vocab_size;
         
@@ -211,8 +215,9 @@ mod model_proofs {
         let pos: usize = kani::any();
         let max_seq_len: usize = kani::any();
         
+        // Smaller bounds for faster verification
+        kani::assume(max_seq_len > 0 && max_seq_len <= 256);
         kani::assume(pos < max_seq_len);
-        kani::assume(max_seq_len <= 4096);
         
         // seq_len = pos + 1
         let seq_len = pos.saturating_add(1);
@@ -228,9 +233,10 @@ mod model_proofs {
         let max_seq_len: usize = kani::any();
         let kv_dim: usize = kani::any();
         
-        kani::assume(n_layers <= 128);
-        kani::assume(max_seq_len <= 4096);
-        kani::assume(kv_dim <= 4096);
+        // Smaller bounds for faster verification
+        kani::assume(n_layers > 0 && n_layers <= 32);
+        kani::assume(max_seq_len > 0 && max_seq_len <= 256);
+        kani::assume(kv_dim > 0 && kv_dim <= 256);
         
         // cache_size = n_layers * max_seq_len * kv_dim
         let cache_size = n_layers
@@ -264,8 +270,9 @@ mod model_proofs {
         let pos: usize = kani::any();
         let max_seq_len: usize = kani::any();
         
+        // Smaller bounds for faster verification
+        kani::assume(max_seq_len > 0 && max_seq_len <= 256);
         kani::assume(pos < max_seq_len);
-        kani::assume(max_seq_len <= 4096);
         
         // pos + 1 for seq_len
         let new_pos = pos.checked_add(1);

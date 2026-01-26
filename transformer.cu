@@ -638,9 +638,9 @@ const int DTX_MAX_PAYLOAD = 1472;
 const int DTX_VERSION = 1;
 const int DTX_MAGIC = 0xDEADBEEF;
 
-const int DTX_CONNECT_TIMEOUT = 5000;
+[[maybe_unused]] const int DTX_CONNECT_TIMEOUT = 5000;
 const int DTX_FRAME_TIMEOUT = 10000;
-const int DTX_RETRY_MAX = 3;
+[[maybe_unused]] const int DTX_RETRY_MAX = 3;
 
 enum class MessageType : uint8_t {
     HANDSHAKE_REQ = 1,
@@ -754,8 +754,8 @@ inline uint32_t crc32_simple(const uint8_t* data, uint32_t len) {
 inline DTXHeader makeHeader(MessageType type, uint16_t seq,
                            const uint8_t* payload, uint32_t payloadLen) {
     DTXHeader hdr;
-    hdr.magic = DTX_MAGIC;
-    hdr.version = DTX_VERSION;
+    hdr.magic = static_cast<uint32_t>(DTX_MAGIC);
+    hdr.version = static_cast<uint8_t>(DTX_VERSION);
     hdr.msgType = static_cast<uint8_t>(type);
     hdr.sequenceNum = seq;
     hdr.payloadLen = payloadLen;
@@ -995,6 +995,7 @@ public:
     Tokenizer() : vocabSize(0), loaded(false) {}
     
     bool loadFromGGUF(const std::vector<std::string>& tokens, const std::vector<std::string>& merges) {
+        (void)merges;
         if (tokens.empty()) {
             std::cerr << "No tokens provided from GGUF" << std::endl;
             return false;
@@ -1636,17 +1637,13 @@ public:
             
             // Process text segment with space markers
             std::string processed;
-            bool atWordStart = (textPos == 0 || text[textPos-1] == '\n');
             for (size_t i = textPos; i < segEnd; i++) {
                 if (text[i] == ' ') {
                     processed += spaceMarker;
-                    atWordStart = true;
                 } else if (text[i] == '\n') {
                     processed += text[i];
-                    atWordStart = true;
                 } else {
                     processed += text[i];
-                    atWordStart = false;
                 }
             }
             
@@ -2920,6 +2917,7 @@ void TransformerServer::handleLayerConfig(const uint8_t*, const DTXHeader& hdr, 
 
     // Acknowledge layer configuration
     DTXHeader ackHdr = makeHeader(MessageType::LAYER_CONFIG_ACK, hdr.sequenceNum + 1, nullptr, 0);
+    (void)ackHdr;
     // Note: Actual client MAC address would be stored in connection session
 }
 
@@ -3495,6 +3493,7 @@ bool DistributedTransformerServer::initialize() {
                                      uint16_t seqLen,
                                      uint8_t startLayer,
                                      uint8_t numLayers) {
+        (void)seqLen;
         return executeForward(input, startLayer, numLayers);
     });
 
@@ -3502,6 +3501,7 @@ bool DistributedTransformerServer::initialize() {
                                       uint16_t seqLen,
                                       uint8_t startLayer,
                                       uint8_t numLayers) {
+        (void)seqLen;
         return executeBackward(gradOutput, startLayer, numLayers);
     });
 
@@ -4460,6 +4460,7 @@ int main(int argc, char* argv[]) {
         }
 
         server.setForwardLayerFunction([](const std::vector<float>& input, int layer, bool) {
+            (void)layer;
             return input;  // Identity for testing
         });
 
@@ -4654,11 +4655,11 @@ int main(int argc, char* argv[]) {
         std::string interfaceName = "eth0";
         uint8_t serverMAC[6] = {0};
         int iterations = 10;
-        int batchSize = 1;
-        int warmupIters = 2;
+        [[maybe_unused]] int batchSize = 1;
+        [[maybe_unused]] int warmupIters = 2;
         std::string outputFile = "";
         bool serverMACProvided = false;
-        bool verbose = false;
+        [[maybe_unused]] bool verbose = false;
 
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];
@@ -4732,7 +4733,7 @@ int main(int argc, char* argv[]) {
 
     } else if (command == "test") {
         // Parse test arguments
-        bool testAll = false;
+        [[maybe_unused]] bool testAll = false;
         bool testProtocol = false;
         bool testConfig = false;
         bool testQuant = false;

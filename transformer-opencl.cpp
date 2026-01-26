@@ -42,6 +42,8 @@
 #include <functional>
 #include <thread>
 
+#define CL_TARGET_OPENCL_VERSION 300
+
 #include <CL/cl.h>
 
 #include <sys/socket.h>
@@ -65,7 +67,7 @@
         } \
     } while(0)
 
-static const char* clErrorString(cl_int err) {
+[[maybe_unused]] static const char* clErrorString(cl_int err) {
     switch (err) {
         case CL_SUCCESS: return "CL_SUCCESS";
         case CL_DEVICE_NOT_FOUND: return "CL_DEVICE_NOT_FOUND";
@@ -89,7 +91,7 @@ static const char* clErrorString(cl_int err) {
 // Optimizations: Fused operations for 2x speedup
 // ============================================================================
 
-static const char* openclKernelSource = R"(
+[[maybe_unused]] static const char* openclKernelSource = R"(
 __kernel void fusedRMSNorm(__global float* output, __global const float* input,
     __global const float* weight, const int dim, const float eps, const int unitOffset) {
     int gid = get_global_id(0);
@@ -917,7 +919,7 @@ public:
             std::vector<uint8_t> raw(t.dataSize);
             stream.read((char*)raw.data(), t.dataSize);
             GGML_DType qtype = static_cast<GGML_DType>(t.dtype);
-            int blockSize = getBlockSize(t.dtype);
+            (void)getBlockSize(t.dtype);
             int numRows = (t.numDims > 1) ? t.shape[0] : 1;
             int cols = numElements / numRows;
             for (int r = 0; r < numRows; r++) {
@@ -1094,7 +1096,7 @@ public:
             
             // Process text segment with space markers
             std::string processed;
-            bool atWordStart = (textPos == 0 || text[textPos-1] == '\n');
+            [[maybe_unused]] bool atWordStart = (textPos == 0 || text[textPos-1] == '\n');
             for (size_t i = textPos; i < segEnd; i++) {
                 if (text[i] == ' ') {
                     processed += spaceMarker;
@@ -2682,14 +2684,14 @@ bool DistributedTransformerServer::initialize() {
     }
 
     server->setForwardCallback([this](const std::vector<float>& input,
-                                     uint16_t seqLen,
+                                     [[maybe_unused]] uint16_t seqLen,
                                      uint8_t startLayer,
                                      uint8_t numLayers) {
         return executeForward(input, startLayer, numLayers);
     });
 
     server->setBackwardCallback([this](const std::vector<float>& gradOutput,
-                                      uint16_t seqLen,
+                                      [[maybe_unused]] uint16_t seqLen,
                                       uint8_t startLayer,
                                       uint8_t numLayers) {
         return executeBackward(gradOutput, startLayer, numLayers);
@@ -3021,16 +3023,16 @@ int main(int argc, char* argv[]) {
         cfg.interfaceName = "eth0";
         
         int maxMessages = 100;
-        int maxClients = 4;
+        [[maybe_unused]] int maxClients = 4;
         bool hasGPU = true;
-        int vocabSize = 50257;
-        int maxSeqLen = 2048;
+        [[maybe_unused]] int vocabSize = 50257;
+        [[maybe_unused]] int maxSeqLen = 2048;
         std::string quantType = "none";
-        float ropeBase = 10000.0f;
-        float ropeScale = 1.0f;
-        float eps = 1e-5f;
-        float dropout = 0.0f;
-        bool verbose = false;
+        [[maybe_unused]] float ropeBase = 10000.0f;
+        [[maybe_unused]] float ropeScale = 1.0f;
+        [[maybe_unused]] float eps = 1e-5f;
+        [[maybe_unused]] float dropout = 0.0f;
+        [[maybe_unused]] bool verbose = false;
 
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];
@@ -3097,7 +3099,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        server.setForwardLayerFunction([](const std::vector<float>& input, int layer, bool) {
+        server.setForwardLayerFunction([](const std::vector<float>& input, [[maybe_unused]] int layer, bool) {
             return input;
         });
 
@@ -3121,11 +3123,11 @@ int main(int argc, char* argv[]) {
         cfg.cacheActivations = true;
         cfg.cacheGradients = true;
         
-        int timeoutMs = 5000;
-        int retries = 3;
+        [[maybe_unused]] int timeoutMs = 5000;
+        [[maybe_unused]] int retries = 3;
         bool serverMACProvided = false;
         bool startLayerSet = false;
-        bool verbose = false;
+        [[maybe_unused]] bool verbose = false;
 
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];

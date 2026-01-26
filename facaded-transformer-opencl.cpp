@@ -42,6 +42,7 @@
 #include <functional>
 #include <thread>
 
+#define CL_TARGET_OPENCL_VERSION 300
 #include <CL/cl.h>
 
 #include <sys/socket.h>
@@ -65,7 +66,7 @@
         } \
     } while(0)
 
-static const char* clErrorString(cl_int err) {
+[[maybe_unused]] static const char* clErrorString(cl_int err) {
     switch (err) {
         case CL_SUCCESS: return "CL_SUCCESS";
         case CL_DEVICE_NOT_FOUND: return "CL_DEVICE_NOT_FOUND";
@@ -1361,6 +1362,7 @@ void TransformerServer::handleLayerConfig(const uint8_t*, const DTXHeader& hdr, 
 
     // Acknowledge layer configuration
     DTXHeader ackHdr = makeHeader(MessageType::LAYER_CONFIG_ACK, hdr.sequenceNum + 1, nullptr, 0);
+    (void)ackHdr;
     // Note: Actual client MAC address would be stored in connection session
 }
 
@@ -1936,6 +1938,7 @@ bool DistributedTransformerServer::initialize() {
                                      uint16_t seqLen,
                                      uint8_t startLayer,
                                      uint8_t numLayers) {
+        (void)seqLen;
         return executeForward(input, startLayer, numLayers);
     });
 
@@ -1943,6 +1946,7 @@ bool DistributedTransformerServer::initialize() {
                                       uint16_t seqLen,
                                       uint8_t startLayer,
                                       uint8_t numLayers) {
+        (void)seqLen;
         return executeBackward(gradOutput, startLayer, numLayers);
     });
 
@@ -2107,6 +2111,7 @@ public:
     Tokenizer() : vocabSize(0), loaded(false) {}
     
     bool loadFromGGUF(const std::vector<std::string>& tokens, const std::vector<std::string>& merges) {
+        (void)merges;
         if (tokens.empty()) {
             std::cerr << "No tokens provided from GGUF" << std::endl;
             return false;
@@ -2519,19 +2524,6 @@ public:
                         
                         tensor.data.resize(totalElements);
                         
-                        // Allocate GPU memory
-                        uint8_t* d_quantized = nullptr;
-                        float* d_output = nullptr;
-                        // CL_CHECK(clCreateBuffer /* replaced cudaMalloc(&d_quantized, tensor.rawData.size()));
-                        // CL_CHECK(clCreateBuffer /* replaced cudaMalloc(&d_output, totalElements * sizeof(float)));
-                        
-                        // Copy quantized data to GPU
-                        // CL_CHECK(clEnqueueWriteBuffer /* replaced cudaMemcpy(d_quantized, tensor.rawData.data(), tensor.rawData.size(), cudaMemcpyHostToDevice));
-                        
-                        // Dequantize on GPU using appropriate kernel
-                        int blockSize = 256;
-                        int gridSize = (totalElements + blockSize - 1) / blockSize;
-                        
                         // For now, fallback to CPU dequantization for all quantized types
                         dequant_row(tensor.rawData.data(), tensor.data.data(), totalElements, 0, (GGML_DType)tensor.dtype);
                         // clReleaseMemObject(d_quantized);
@@ -2769,17 +2761,11 @@ public:
             
             // Process text segment with space markers
             std::string processed;
-            bool atWordStart = (textPos == 0 || text[textPos-1] == '\n');
             for (size_t i = textPos; i < segEnd; i++) {
                 if (text[i] == ' ') {
                     processed += spaceMarker;
-                    atWordStart = true;
-                } else if (text[i] == '\n') {
-                    processed += text[i];
-                    atWordStart = true;
                 } else {
                     processed += text[i];
-                    atWordStart = false;
                 }
             }
             
@@ -3320,7 +3306,8 @@ public:
         context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
         if (err != CL_SUCCESS) return false;
         
-        queue = clCreateCommandQueue(context, device, 0, &err);
+        cl_queue_properties props[] = {0};
+        queue = clCreateCommandQueueWithProperties(context, device, props, &err);
         if (err != CL_SUCCESS) return false;
         
         // Compile kernels
@@ -3414,6 +3401,7 @@ public:
     }
     
     std::string generate(const std::string& prompt, const GenerationConfig& cfg) {
+        (void)cfg;
         if (!gpuInitialized) {
             std::cerr << "[OpenCL] Not initialized" << std::endl;
             return "";
@@ -4354,6 +4342,7 @@ int main(int argc, char* argv[]) {
         }
 
         server.setForwardLayerFunction([](const std::vector<float>& input, int layer, bool) {
+            (void)layer;
             return input;  // Identity for testing
         });
 
@@ -4586,6 +4575,9 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
         }
+
+        (void)batchSize;
+        (void)warmupIters;
 
         if (!serverMACProvided) {
             std::cerr << "Error: Server MAC address required (-s or --server)" << std::endl;
@@ -5052,6 +5044,8 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
         }
+
+        (void)verbose;
 
         // If no specific tests selected, run basic tests
         if (!runAll && !testProtocol && !testConfig && !testQuant && !testKernels && 
