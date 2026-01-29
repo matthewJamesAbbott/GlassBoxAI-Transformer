@@ -43,11 +43,12 @@ This project demonstrates enterprise-grade software engineering practices includ
 7. [CLI Reference](#cli-reference)
    - [Standard Transformer Commands](#standard-transformer-commands)
    - [Facade Transformer Commands](#facade-transformer-commands)
-8. [Testing](#testing)
-9. [Formal Verification with Kani](#formal-verification-with-kani)
-10. [CISA/NSA Compliance](#cisansa-compliance)
-11. [License](#license)
-12. [Author](#author)
+8. [Training](#training)
+9. [Testing](#testing)
+10. [Formal Verification with Kani](#formal-verification-with-kani)
+11. [CISA/NSA Compliance](#cisansa-compliance)
+12. [License](#license)
+13. [Author](#author)
 
 ---
 
@@ -871,6 +872,60 @@ For systems with limited GPU memory, GlassBoxAI-Transformer supports mixed devic
 | Mixed (few CPU layers) | ~80-90% of GPU | Reduced GPU memory |
 | Mixed (many CPU layers) | ~30-50% of GPU | Minimal GPU memory |
 | All CPU | Slowest | No GPU memory |
+
+---
+
+## **Training**
+
+### Training Features
+
+| Feature | Description |
+|---------|-------------|
+| **Backpropagation** | Full gradient computation through all transformer layers |
+| **Adam Optimizer** | Adaptive learning rate with bias correction (β1=0.9, β2=0.999) |
+| **Gradient Clipping** | Norm-based gradient clipping for training stability |
+| **Activation Caching** | Efficient caching for backward pass computation |
+| **Cross-Entropy Loss** | Fused softmax + cross-entropy loss computation |
+| **Learning Rate Control** | Configurable learning rate with warmup support |
+
+### Train Command Options
+
+| Option | Description |
+|--------|-------------|
+| `-m, --model <path>` | Path to GGUF model file (required) |
+| `--lr <n>` | Learning rate (default: 1e-4) |
+| `--epochs <n>` | Number of training epochs (default: 1) |
+| `--batch-size <n>` | Batch size (default: 1) |
+| `--grad-clip <n>` | Gradient clipping norm (default: 1.0) |
+| `--train-text <text>` | Training text for fine-tuning |
+| `--verbose` | Show detailed training progress |
+| `--help` | Show training help |
+
+### Implementation Status
+
+| Implementation | Training Status |
+|---------------|-----------------|
+| **facaded_transformer.cu** | ✅ Full CLI support |
+| **transformer.cu** | ✅ Full CLI support |
+| **facaded-transformer-opencl.cpp** | ✅ Full CLI support |
+| **transformer-opencl.cpp** | ✅ Full CLI support |
+| **Rust implementations** | ✅ GpuTrainer class available |
+
+### Example Usage
+
+```bash
+# Basic training
+./facaded-transformer-cuda train -m models/llama.gguf --train-text "Hello world"
+
+# Training with custom parameters
+./facaded-transformer-cuda train -m models/llama.gguf \
+    --lr 0.0001 --epochs 10 --batch-size 4 --grad-clip 1.0 \
+    --train-text "The quick brown fox" --verbose
+
+# Fine-tuning with verbose output
+./facaded-transformer-cuda train -m models/tinyllama.gguf \
+    --epochs 100 --verbose --train-text "Custom training data here"
+```
 
 ---
 

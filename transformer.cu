@@ -4201,6 +4201,920 @@ void GPUTextGenerator::vecMatMul(float* out, const float* vec, void* mat, int K,
     }
 }
 
+// ============================================================================
+// BACKWARD PASS KERNELS FOR TRAINING
+// ============================================================================
+
+__global__ void crossEntropyBackwardKernel(
+    float* __restrict__ dLogits,
+    const float* __restrict__ logits,
+    const int* __restrict__ targets,
+    int vocabSize,
+    int batchSize
+) {
+    int b = blockIdx.x;
+    int v = threadIdx.x + blockIdx.y * blockDim.x;
+    
+    if (b >= batchSize || v >= vocabSize) return;
+    
+    extern __shared__ float smem[];
+    float* maxVal = smem;
+    float* sumExp = smem + 1;
+    
+    const float* logitsRow = logits + b * vocabSize;
+    float* dLogitsRow = dLogits + b * vocabSize;
+    int target = targets[b];
+    
+    float localMax = -INFINITY;
+    for (int i = v; i < vocabSize; i += blockDim.x) {
+        localMax = fmaxf(localMax, logitsRow[i]);
+    }
+    smem[threadIdx.x + 2] = localMax;
+    __syncthreads();
+    
+    if (threadIdx.x == 0) {
+        *maxVal = smem[2];
+        for (int i = 1; i < blockDim.x && i < vocabSize; i++) {
+            *maxVal = fmaxf(*maxVal, smem[i + 2]);
+        }
+        *sumExp = 0.0f;
+    }
+    __syncthreads();
+    
+    float localSum = 0.0f;
+    for (int i = v; i < vocabSize; i += blockDim.x) {
+        localSum += expf(logitsRow[i] - *maxVal);
+    }
+    atomicAdd(sumExp, localSum);
+    __syncthreads();
+    
+    for (int i = v; i < vocabSize; i += blockDim.x) {
+        float prob = expf(logitsRow[i] - *maxVal) / (*sumExp + 1e-10f);
+        dLogitsRow[i] = (prob - (i == target ? 1.0f : 0.0f)) / batchSize;
+    }
+}
+
+__global__ void vecMatMulBackwardInputKernel(
+    float* __restrict__ dInput,
+    const float* __restrict__ dOutput,
+    const float* __restrict__ weight,
+    int K,
+    int N
+) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= K) return;
+    
+    float sum = 0.0f;
+    for (int n = 0; n < N; n++) {
+        sum += dOutput[n] * weight[n * K + k];
+    }
+    dInput[k] = sum;
+}
+
+__global__ void vecMatMulBackwardWeightKernel(
+    float* __restrict__ dWeight,
+    const float* __restrict__ input,
+    const float* __restrict__ dOutput,
+    int K,
+    int N
+) {
+    int n = blockIdx.y;
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (k >= K || n >= N) return;
+    
+    atomicAdd(&dWeight[n * K + k], dOutput[n] * input[k]);
+}
+
+__global__ void rmsNormBackwardKernel(
+    float* __restrict__ dInput,
+    float* __restrict__ dWeight,
+    const float* __restrict__ dOutput,
+    const float* __restrict__ input,
+    const float* __restrict__ weight,
+    int dim,
+    float eps
+) {
+    extern __shared__ float smem[];
+    
+    int idx = threadIdx.x;
+    
+    float localSS = 0.0f;
+    for (int i = idx; i < dim; i += blockDim.x) {
+        float val = input[i];
+        localSS += val * val;
+    }
+    smem[idx] = localSS;
+    __syncthreads();
+    
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (idx < s) smem[idx] += smem[idx + s];
+        __syncthreads();
+    }
+    
+    float ss = smem[0];
+    float rms = rsqrtf(ss / dim + eps);
+    float rms3 = rms * rms * rms;
+    
+    float sumGradNorm = 0.0f;
+    for (int i = idx; i < dim; i += blockDim.x) {
+        sumGradNorm += dOutput[i] * weight[i] * input[i];
+    }
+    smem[idx] = sumGradNorm;
+    __syncthreads();
+    
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (idx < s) smem[idx] += smem[idx + s];
+        __syncthreads();
+    }
+    sumGradNorm = smem[0];
+    
+    for (int i = idx; i < dim; i += blockDim.x) {
+        float x = input[i];
+        float dNorm = dOutput[i] * weight[i];
+        float dX = dNorm * rms - x * rms3 * sumGradNorm / dim;
+        dInput[i] = dX;
+        atomicAdd(&dWeight[i], dOutput[i] * x * rms);
+    }
+}
+
+__global__ void ropeBackwardKernel(
+    float* __restrict__ dQ,
+    float* __restrict__ dK,
+    int qDim,
+    int kvDim,
+    int headDim,
+    int position,
+    float theta,
+    float ropeScale
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    float scaledPos = position / ropeScale;
+    
+    if (idx < qDim / 2) {
+        int i = idx * 2;
+        int headIdx = i % headDim;
+        float freq = 1.0f / powf(theta, (float)headIdx / headDim);
+        float angle = scaledPos * freq;
+        float cs = cosf(angle), sn = sinf(angle);
+        
+        float dq0 = dQ[i], dq1 = dQ[i + 1];
+        dQ[i] = dq0 * cs + dq1 * sn;
+        dQ[i + 1] = -dq0 * sn + dq1 * cs;
+    }
+    
+    if (dK && idx < kvDim / 2) {
+        int i = idx * 2;
+        int headIdx = i % headDim;
+        float freq = 1.0f / powf(theta, (float)headIdx / headDim);
+        float angle = scaledPos * freq;
+        float cs = cosf(angle), sn = sinf(angle);
+        
+        float dk0 = dK[i], dk1 = dK[i + 1];
+        dK[i] = dk0 * cs + dk1 * sn;
+        dK[i + 1] = -dk0 * sn + dk1 * cs;
+    }
+}
+
+__global__ void swiGLUBackwardKernel(
+    float* __restrict__ dGate,
+    float* __restrict__ dUp,
+    const float* __restrict__ dOutput,
+    const float* __restrict__ gate,
+    const float* __restrict__ up,
+    int size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= size) return;
+    
+    float g = gate[i];
+    float u = up[i];
+    float sigmoid_g = 1.0f / (1.0f + expf(-g));
+    float silu_g = g * sigmoid_g;
+    float dsilu_dg = sigmoid_g + g * sigmoid_g * (1.0f - sigmoid_g);
+    
+    dUp[i] = dOutput[i] * silu_g;
+    dGate[i] = dOutput[i] * u * dsilu_dg;
+}
+
+__global__ void residualBackwardKernel(
+    float* __restrict__ dResidual,
+    const float* __restrict__ dOutput,
+    int size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        atomicAdd(&dResidual[i], dOutput[i]);
+    }
+}
+
+__global__ void adamOptimizerKernel(
+    float* __restrict__ params,
+    const float* __restrict__ grads,
+    float* __restrict__ m,
+    float* __restrict__ v,
+    int numParams,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    int t
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numParams) return;
+    
+    float g = grads[idx];
+    float m_t = beta1 * m[idx] + (1.0f - beta1) * g;
+    float v_t = beta2 * v[idx] + (1.0f - beta2) * g * g;
+    
+    m[idx] = m_t;
+    v[idx] = v_t;
+    
+    float m_hat = m_t / (1.0f - powf(beta1, t));
+    float v_hat = v_t / (1.0f - powf(beta2, t));
+    
+    params[idx] -= lr * m_hat / (sqrtf(v_hat) + eps);
+}
+
+__global__ void computeLossKernel(
+    float* __restrict__ loss,
+    const float* __restrict__ logits,
+    const int* __restrict__ targets,
+    int vocabSize,
+    int batchSize
+) {
+    if (threadIdx.x == 0) {
+        float totalLoss = 0.0f;
+        
+        for (int b = 0; b < batchSize; b++) {
+            const float* row = logits + b * vocabSize;
+            int target = targets[b];
+            
+            float localMax = row[0];
+            for (int i = 1; i < vocabSize; i++) {
+                localMax = fmaxf(localMax, row[i]);
+            }
+            
+            float sumE = 0.0f;
+            for (int i = 0; i < vocabSize; i++) {
+                sumE += expf(row[i] - localMax);
+            }
+            
+            float logProb = row[target] - localMax - logf(sumE + 1e-10f);
+            totalLoss -= logProb;
+        }
+        
+        *loss = totalLoss / batchSize;
+    }
+}
+
+__global__ void gradientClipKernel(
+    float* __restrict__ grads,
+    int numParams,
+    float maxNorm,
+    float* __restrict__ globalNorm
+) {
+    __shared__ float localSum;
+    
+    if (threadIdx.x == 0) localSum = 0.0f;
+    __syncthreads();
+    
+    float threadSum = 0.0f;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < numParams; i += blockDim.x * gridDim.x) {
+        float g = grads[i];
+        threadSum += g * g;
+    }
+    atomicAdd(&localSum, threadSum);
+    __syncthreads();
+    
+    if (threadIdx.x == 0) {
+        atomicAdd(globalNorm, localSum);
+    }
+    __syncthreads();
+    
+    float norm = sqrtf(*globalNorm);
+    if (norm > maxNorm) {
+        float scale = maxNorm / norm;
+        for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < numParams; i += blockDim.x * gridDim.x) {
+            grads[i] *= scale;
+        }
+    }
+}
+
+// ============================================================================
+// TRAINING CONFIG AND GPU TRAINER CLASS
+// ============================================================================
+
+struct TrainingConfig {
+    float learningRate = 1e-4f;
+    float beta1 = 0.9f;
+    float beta2 = 0.999f;
+    float adamEps = 1e-8f;
+    float gradientClipNorm = 1.0f;
+    int batchSize = 1;
+};
+
+struct LayerGradients {
+    float* dAttnNorm = nullptr;
+    float* dFFNNorm = nullptr;
+    float* dWq = nullptr;
+    float* dWk = nullptr;
+    float* dWv = nullptr;
+    float* dWo = nullptr;
+    float* dW1 = nullptr;
+    float* dW2 = nullptr;
+    float* dW3 = nullptr;
+};
+
+struct LayerAdamState {
+    float* mWq = nullptr; float* vWq = nullptr;
+    float* mWk = nullptr; float* vWk = nullptr;
+    float* mWv = nullptr; float* vWv = nullptr;
+    float* mWo = nullptr; float* vWo = nullptr;
+    float* mW1 = nullptr; float* vW1 = nullptr;
+    float* mW2 = nullptr; float* vW2 = nullptr;
+    float* mW3 = nullptr; float* vW3 = nullptr;
+    float* mAttnNorm = nullptr; float* vAttnNorm = nullptr;
+    float* mFFNNorm = nullptr; float* vFFNNorm = nullptr;
+};
+
+struct ForwardActivations {
+    float* preAttnNorm = nullptr;
+    float* postAttnNorm = nullptr;
+    float* Q = nullptr;
+    float* K = nullptr;
+    float* V = nullptr;
+    float* attnOutput = nullptr;
+    float* postAttnResidual = nullptr;
+    float* preFFNNorm = nullptr;
+    float* postFFNNorm = nullptr;
+    float* gate = nullptr;
+    float* up = nullptr;
+    float* ffnHidden = nullptr;
+};
+
+class GPUTrainer {
+private:
+    GGUFLoader* model;
+    ChatTokenizer* tokenizer;
+    TrainingConfig config;
+    
+    int dim, nLayers, nHeads, nKVHeads, ffnDim, vocabSize, maxSeqLen;
+    int headDim, qDim, kvDim;
+    float eps, theta, ropeScale;
+    int adamTimestep = 0;
+    
+    float* d_embeddings = nullptr;
+    float* d_outputWeight = nullptr;
+    float* d_normWeight = nullptr;
+    
+    float* d_dEmbeddings = nullptr;
+    float* d_dOutputWeight = nullptr;
+    float* d_dNormWeight = nullptr;
+    
+    float* d_mEmbeddings = nullptr; float* d_vEmbeddings = nullptr;
+    float* d_mOutputWeight = nullptr; float* d_vOutputWeight = nullptr;
+    float* d_mNormWeight = nullptr; float* d_vNormWeight = nullptr;
+    
+    struct GPULayerWeightsTrainable {
+        float* attnNorm = nullptr;
+        float* ffnNorm = nullptr;
+        float* wq = nullptr;
+        float* wk = nullptr;
+        float* wv = nullptr;
+        float* wo = nullptr;
+        float* w1 = nullptr;
+        float* w2 = nullptr;
+        float* w3 = nullptr;
+    };
+    std::vector<GPULayerWeightsTrainable> gpuLayers;
+    std::vector<LayerGradients> layerGradients;
+    std::vector<LayerAdamState> layerAdamState;
+    std::vector<ForwardActivations> forwardCache;
+    
+    float* d_hidden = nullptr;
+    float* d_xb = nullptr;
+    float* d_Q = nullptr;
+    float* d_K = nullptr;
+    float* d_V = nullptr;
+    float* d_attnOut = nullptr;
+    float* d_hb = nullptr;
+    float* d_hb2 = nullptr;
+    float* d_logits = nullptr;
+    
+    float* d_dHidden = nullptr;
+    float* d_dXb = nullptr;
+    float* d_dQ = nullptr;
+    float* d_dK = nullptr;
+    float* d_dV = nullptr;
+    float* d_dAttnOut = nullptr;
+    float* d_dHb = nullptr;
+    float* d_dHb2 = nullptr;
+    float* d_dLogits = nullptr;
+    
+    float* d_kvCacheK = nullptr;
+    float* d_kvCacheV = nullptr;
+    
+    int* d_targets = nullptr;
+    float* d_loss = nullptr;
+    float* d_gradNorm = nullptr;
+    float* h_pinnedLoss = nullptr;
+    float* h_pinnedGradients = nullptr;
+    
+    cudaStream_t stream;
+    cudaStream_t transferStream;
+    bool initialized = false;
+    
+    size_t totalParams = 0;
+    
+    float* toGPU(const std::vector<float>& data) {
+        if (data.empty()) return nullptr;
+        float* d_ptr;
+        CUDA_CHECK(cudaMalloc(&d_ptr, data.size() * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(d_ptr, data.data(), data.size() * sizeof(float), cudaMemcpyHostToDevice));
+        return d_ptr;
+    }
+    
+    void freeGPU(float*& ptr) {
+        if (ptr) { cudaFree(ptr); ptr = nullptr; }
+    }
+
+public:
+    GPUTrainer() : model(nullptr), tokenizer(nullptr) {}
+    
+    ~GPUTrainer() { cleanup(); }
+    
+    void cleanup() {
+        freeGPU(d_embeddings); freeGPU(d_outputWeight); freeGPU(d_normWeight);
+        freeGPU(d_dEmbeddings); freeGPU(d_dOutputWeight); freeGPU(d_dNormWeight);
+        freeGPU(d_mEmbeddings); freeGPU(d_vEmbeddings);
+        freeGPU(d_mOutputWeight); freeGPU(d_vOutputWeight);
+        freeGPU(d_mNormWeight); freeGPU(d_vNormWeight);
+        
+        freeGPU(d_hidden); freeGPU(d_xb);
+        freeGPU(d_Q); freeGPU(d_K); freeGPU(d_V);
+        freeGPU(d_attnOut); freeGPU(d_hb); freeGPU(d_hb2);
+        freeGPU(d_logits);
+        
+        freeGPU(d_dHidden); freeGPU(d_dXb);
+        freeGPU(d_dQ); freeGPU(d_dK); freeGPU(d_dV);
+        freeGPU(d_dAttnOut); freeGPU(d_dHb); freeGPU(d_dHb2);
+        freeGPU(d_dLogits);
+        
+        freeGPU(d_kvCacheK); freeGPU(d_kvCacheV);
+        
+        if (d_targets) { cudaFree(d_targets); d_targets = nullptr; }
+        freeGPU(d_loss); freeGPU(d_gradNorm);
+        
+        if (h_pinnedLoss) { cudaFreeHost(h_pinnedLoss); h_pinnedLoss = nullptr; }
+        if (h_pinnedGradients) { cudaFreeHost(h_pinnedGradients); h_pinnedGradients = nullptr; }
+        
+        for (auto& l : gpuLayers) {
+            freeGPU(l.attnNorm); freeGPU(l.ffnNorm);
+            freeGPU(l.wq); freeGPU(l.wk); freeGPU(l.wv); freeGPU(l.wo);
+            freeGPU(l.w1); freeGPU(l.w2); freeGPU(l.w3);
+        }
+        gpuLayers.clear();
+        
+        for (auto& g : layerGradients) {
+            freeGPU(g.dAttnNorm); freeGPU(g.dFFNNorm);
+            freeGPU(g.dWq); freeGPU(g.dWk); freeGPU(g.dWv); freeGPU(g.dWo);
+            freeGPU(g.dW1); freeGPU(g.dW2); freeGPU(g.dW3);
+        }
+        layerGradients.clear();
+        
+        for (auto& s : layerAdamState) {
+            freeGPU(s.mWq); freeGPU(s.vWq);
+            freeGPU(s.mWk); freeGPU(s.vWk);
+            freeGPU(s.mWv); freeGPU(s.vWv);
+            freeGPU(s.mWo); freeGPU(s.vWo);
+            freeGPU(s.mW1); freeGPU(s.vW1);
+            freeGPU(s.mW2); freeGPU(s.vW2);
+            freeGPU(s.mW3); freeGPU(s.vW3);
+            freeGPU(s.mAttnNorm); freeGPU(s.vAttnNorm);
+            freeGPU(s.mFFNNorm); freeGPU(s.vFFNNorm);
+        }
+        layerAdamState.clear();
+        
+        for (auto& a : forwardCache) {
+            freeGPU(a.preAttnNorm); freeGPU(a.postAttnNorm);
+            freeGPU(a.Q); freeGPU(a.K); freeGPU(a.V);
+            freeGPU(a.attnOutput); freeGPU(a.postAttnResidual);
+            freeGPU(a.preFFNNorm); freeGPU(a.postFFNNorm);
+            freeGPU(a.gate); freeGPU(a.up); freeGPU(a.ffnHidden);
+        }
+        forwardCache.clear();
+        
+        if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
+        if (transferStream) { cudaStreamDestroy(transferStream); transferStream = nullptr; }
+        
+        initialized = false;
+    }
+    
+    bool initialize(GGUFLoader* m, ChatTokenizer* t, const TrainingConfig& cfg) {
+        model = m;
+        tokenizer = t;
+        config = cfg;
+        
+        CUDA_CHECK(cudaStreamCreate(&stream));
+        CUDA_CHECK(cudaStreamCreate(&transferStream));
+        
+        dim = model->getEmbedDim();
+        nLayers = model->getNumLayers();
+        nHeads = model->getNumHeads();
+        nKVHeads = model->getNumKVHeads();
+        ffnDim = model->getFFNDim();
+        vocabSize = model->getVocabSize();
+        maxSeqLen = std::min(model->getMaxSeqLen(), 2048);
+        headDim = dim / nHeads;
+        qDim = nHeads * headDim;
+        kvDim = nKVHeads * headDim;
+        eps = model->getRmsEps();
+        theta = model->getRopeTheta();
+        ropeScale = model->getRopeScale();
+        
+        std::cout << "[GPUTrainer] Loading model weights..." << std::endl;
+        
+        d_embeddings = toGPU(model->loadTensorData("token_embd.weight"));
+        auto outW = model->loadTensorData("output.weight");
+        d_outputWeight = outW.empty() ? nullptr : toGPU(outW);
+        if (!d_outputWeight) d_outputWeight = d_embeddings;
+        d_normWeight = toGPU(model->loadTensorData("output_norm.weight"));
+        
+        size_t embSize = (size_t)vocabSize * dim;
+        totalParams = embSize + dim;
+        
+        CUDA_CHECK(cudaMalloc(&d_dEmbeddings, embSize * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dNormWeight, dim * sizeof(float)));
+        
+        #define ALLOC_ADAM(ptr_m, ptr_v, size) \
+            CUDA_CHECK(cudaMalloc(&ptr_m, (size) * sizeof(float))); \
+            CUDA_CHECK(cudaMalloc(&ptr_v, (size) * sizeof(float))); \
+            CUDA_CHECK(cudaMemset(ptr_m, 0, (size) * sizeof(float))); \
+            CUDA_CHECK(cudaMemset(ptr_v, 0, (size) * sizeof(float)));
+        
+        ALLOC_ADAM(d_mEmbeddings, d_vEmbeddings, embSize);
+        ALLOC_ADAM(d_mNormWeight, d_vNormWeight, dim);
+        
+        #undef ALLOC_ADAM
+        
+        gpuLayers.resize(nLayers);
+        layerGradients.resize(nLayers);
+        layerAdamState.resize(nLayers);
+        forwardCache.resize(nLayers);
+        
+        for (int l = 0; l < nLayers; l++) {
+            std::string prefix = "blk." + std::to_string(l) + ".";
+            auto& layer = gpuLayers[l];
+            
+            layer.attnNorm = toGPU(model->loadTensorData(prefix + "attn_norm.weight"));
+            layer.ffnNorm = toGPU(model->loadTensorData(prefix + "ffn_norm.weight"));
+            layer.wq = toGPU(model->loadTensorData(prefix + "attn_q.weight"));
+            layer.wk = toGPU(model->loadTensorData(prefix + "attn_k.weight"));
+            layer.wv = toGPU(model->loadTensorData(prefix + "attn_v.weight"));
+            layer.wo = toGPU(model->loadTensorData(prefix + "attn_output.weight"));
+            layer.w1 = toGPU(model->loadTensorData(prefix + "ffn_gate.weight"));
+            layer.w2 = toGPU(model->loadTensorData(prefix + "ffn_down.weight"));
+            layer.w3 = toGPU(model->loadTensorData(prefix + "ffn_up.weight"));
+            
+            auto& g = layerGradients[l];
+            CUDA_CHECK(cudaMalloc(&g.dAttnNorm, dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&g.dFFNNorm, dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&g.dWq, (size_t)qDim * dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&g.dWk, (size_t)kvDim * dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&g.dWv, (size_t)kvDim * dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&g.dWo, (size_t)dim * qDim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&g.dW1, (size_t)ffnDim * dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&g.dW2, (size_t)dim * ffnDim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&g.dW3, (size_t)ffnDim * dim * sizeof(float)));
+            
+            #define ALLOC_ADAM_PAIR(ptr_m, ptr_v, size) \
+                CUDA_CHECK(cudaMalloc(&ptr_m, (size) * sizeof(float))); \
+                CUDA_CHECK(cudaMalloc(&ptr_v, (size) * sizeof(float))); \
+                CUDA_CHECK(cudaMemset(ptr_m, 0, (size) * sizeof(float))); \
+                CUDA_CHECK(cudaMemset(ptr_v, 0, (size) * sizeof(float)));
+            
+            auto& s = layerAdamState[l];
+            ALLOC_ADAM_PAIR(s.mWq, s.vWq, (size_t)qDim * dim);
+            ALLOC_ADAM_PAIR(s.mWk, s.vWk, (size_t)kvDim * dim);
+            ALLOC_ADAM_PAIR(s.mWv, s.vWv, (size_t)kvDim * dim);
+            ALLOC_ADAM_PAIR(s.mWo, s.vWo, (size_t)dim * qDim);
+            ALLOC_ADAM_PAIR(s.mW1, s.vW1, (size_t)ffnDim * dim);
+            ALLOC_ADAM_PAIR(s.mW2, s.vW2, (size_t)dim * ffnDim);
+            ALLOC_ADAM_PAIR(s.mW3, s.vW3, (size_t)ffnDim * dim);
+            ALLOC_ADAM_PAIR(s.mAttnNorm, s.vAttnNorm, dim);
+            ALLOC_ADAM_PAIR(s.mFFNNorm, s.vFFNNorm, dim);
+            
+            #undef ALLOC_ADAM_PAIR
+            
+            auto& a = forwardCache[l];
+            CUDA_CHECK(cudaMalloc(&a.preAttnNorm, dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.postAttnNorm, dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.Q, qDim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.K, kvDim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.V, kvDim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.attnOutput, qDim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.postAttnResidual, dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.preFFNNorm, dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.postFFNNorm, dim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.gate, ffnDim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.up, ffnDim * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&a.ffnHidden, ffnDim * sizeof(float)));
+            
+            size_t layerParams = dim * 2 + (size_t)qDim * dim + (size_t)kvDim * dim * 2 +
+                                (size_t)dim * qDim + (size_t)ffnDim * dim * 3;
+            totalParams += layerParams;
+            
+            if ((l + 1) % 4 == 0) {
+                std::cout << "[GPUTrainer] Loaded layer " << (l + 1) << "/" << nLayers << std::endl;
+            }
+        }
+        
+        CUDA_CHECK(cudaMalloc(&d_hidden, dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_xb, dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_Q, qDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_K, kvDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_V, kvDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_attnOut, qDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_hb, ffnDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_hb2, ffnDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_logits, vocabSize * sizeof(float)));
+        
+        CUDA_CHECK(cudaMalloc(&d_dHidden, dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dXb, dim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dQ, qDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dK, kvDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dV, kvDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dAttnOut, qDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dHb, ffnDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dHb2, ffnDim * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dLogits, vocabSize * sizeof(float)));
+        
+        size_t kvSize = (size_t)nLayers * maxSeqLen * kvDim * sizeof(float);
+        CUDA_CHECK(cudaMalloc(&d_kvCacheK, kvSize));
+        CUDA_CHECK(cudaMalloc(&d_kvCacheV, kvSize));
+        
+        CUDA_CHECK(cudaMalloc(&d_targets, maxSeqLen * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_loss, sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_gradNorm, sizeof(float)));
+        
+        CUDA_CHECK(cudaMallocHost(&h_pinnedLoss, sizeof(float)));
+        CUDA_CHECK(cudaMallocHost(&h_pinnedGradients, 1024 * sizeof(float)));
+        
+        std::cout << "[GPUTrainer] Total params: " << totalParams / 1e6 << "M" << std::endl;
+        
+        initialized = true;
+        return true;
+    }
+    
+    void forwardTraining(const std::vector<int>& tokens) {
+        if (!initialized) return;
+        
+        CUDA_CHECK(cudaMemset(d_kvCacheK, 0, (size_t)nLayers * maxSeqLen * kvDim * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_kvCacheV, 0, (size_t)nLayers * maxSeqLen * kvDim * sizeof(float)));
+        
+        for (int pos = 0; pos < (int)tokens.size(); pos++) {
+            int token = tokens[pos];
+            
+            CUDA_CHECK(cudaMemcpy(d_hidden, d_embeddings + token * dim, 
+                                  dim * sizeof(float), cudaMemcpyDeviceToDevice));
+            
+            for (int l = 0; l < nLayers; l++) {
+                auto& layer = gpuLayers[l];
+                auto& cache = forwardCache[l];
+                
+                CUDA_CHECK(cudaMemcpy(cache.preAttnNorm, d_hidden, dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                fusedRMSNormKernel<<<1, 256, 0, stream>>>(d_xb, d_hidden, layer.attnNorm, dim, eps, false);
+                CUDA_CHECK(cudaMemcpy(cache.postAttnNorm, d_xb, dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                int blocks256 = (std::max(qDim, std::max(kvDim, dim)) + 255) / 256;
+                vecMatMulKernel<<<blocks256, 256, 0, stream>>>(d_Q, d_xb, layer.wq, dim, qDim);
+                vecMatMulKernel<<<blocks256, 256, 0, stream>>>(d_K, d_xb, layer.wk, dim, kvDim);
+                vecMatMulKernel<<<blocks256, 256, 0, stream>>>(d_V, d_xb, layer.wv, dim, kvDim);
+                
+                CUDA_CHECK(cudaMemcpy(cache.Q, d_Q, qDim * sizeof(float), cudaMemcpyDeviceToDevice));
+                CUDA_CHECK(cudaMemcpy(cache.K, d_K, kvDim * sizeof(float), cudaMemcpyDeviceToDevice));
+                CUDA_CHECK(cudaMemcpy(cache.V, d_V, kvDim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                int ropeBlocks = (std::max(qDim, kvDim) / 2 + 255) / 256;
+                fusedRoPEKernel<<<ropeBlocks, 256, 0, stream>>>(d_Q, d_K, qDim, kvDim, headDim, pos, theta, ropeScale);
+                
+                size_t kvOffset = (size_t)l * maxSeqLen * kvDim + pos * kvDim;
+                CUDA_CHECK(cudaMemcpy(d_kvCacheK + kvOffset, d_K, kvDim * sizeof(float), cudaMemcpyDeviceToDevice));
+                CUDA_CHECK(cudaMemcpy(d_kvCacheV + kvOffset, d_V, kvDim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                float scale = 1.0f / sqrtf((float)headDim);
+                int kvMul = nHeads / nKVHeads;
+                
+                for (int h = 0; h < nHeads; h++) {
+                    int kvHead = h / kvMul;
+                    float* layerKCache = d_kvCacheK + (size_t)l * maxSeqLen * kvDim;
+                    float* layerVCache = d_kvCacheV + (size_t)l * maxSeqLen * kvDim;
+                    
+                    int sharedSize = (pos + 1) * sizeof(float);
+                    fusedAttentionKernel<<<1, 128, sharedSize, stream>>>(
+                        d_attnOut + h * headDim, d_Q + h * headDim,
+                        layerKCache + kvHead * headDim, layerVCache + kvHead * headDim,
+                        headDim, pos + 1, scale, kvDim);
+                }
+                
+                CUDA_CHECK(cudaMemcpy(cache.attnOutput, d_attnOut, qDim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                vecMatMulKernel<<<blocks256, 256, 0, stream>>>(d_xb, d_attnOut, layer.wo, qDim, dim);
+                residualAddKernel<<<(dim + 255) / 256, 256, 0, stream>>>(d_hidden, d_xb, dim);
+                
+                CUDA_CHECK(cudaMemcpy(cache.postAttnResidual, d_hidden, dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                CUDA_CHECK(cudaMemcpy(cache.preFFNNorm, d_hidden, dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                fusedRMSNormKernel<<<1, 256, 0, stream>>>(d_xb, d_hidden, layer.ffnNorm, dim, eps, false);
+                CUDA_CHECK(cudaMemcpy(cache.postFFNNorm, d_xb, dim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                vecMatMulKernel<<<(ffnDim + 255) / 256, 256, 0, stream>>>(d_hb, d_xb, layer.w1, dim, ffnDim);
+                vecMatMulKernel<<<(ffnDim + 255) / 256, 256, 0, stream>>>(d_hb2, d_xb, layer.w3, dim, ffnDim);
+                
+                CUDA_CHECK(cudaMemcpy(cache.gate, d_hb, ffnDim * sizeof(float), cudaMemcpyDeviceToDevice));
+                CUDA_CHECK(cudaMemcpy(cache.up, d_hb2, ffnDim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                fusedSwiGLUKernel<<<(ffnDim + 255) / 256, 256, 0, stream>>>(d_hb, d_hb, d_hb2, ffnDim);
+                CUDA_CHECK(cudaMemcpy(cache.ffnHidden, d_hb, ffnDim * sizeof(float), cudaMemcpyDeviceToDevice));
+                
+                vecMatMulKernel<<<blocks256, 256, 0, stream>>>(d_xb, d_hb, layer.w2, ffnDim, dim);
+                residualAddKernel<<<(dim + 255) / 256, 256, 0, stream>>>(d_hidden, d_xb, dim);
+            }
+            
+            fusedRMSNormKernel<<<1, 256, 0, stream>>>(d_hidden, d_hidden, d_normWeight, dim, eps, false);
+        }
+        
+        vecMatMulKernel<<<(vocabSize + 255) / 256, 256, 0, stream>>>(d_logits, d_hidden, d_outputWeight, dim, vocabSize);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+    
+    float computeLoss(const std::vector<int>& targets) {
+        CUDA_CHECK(cudaMemcpy(d_targets, targets.data(), targets.size() * sizeof(int), cudaMemcpyHostToDevice));
+        computeLossKernel<<<1, 1, 0, stream>>>(d_loss, d_logits, d_targets, vocabSize, targets.size());
+        CUDA_CHECK(cudaMemcpyAsync(h_pinnedLoss, d_loss, sizeof(float), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        return *h_pinnedLoss;
+    }
+    
+    void backward(const std::vector<int>& tokens, const std::vector<int>& targets) {
+        int batchSize = targets.size();
+        CUDA_CHECK(cudaMemcpy(d_targets, targets.data(), batchSize * sizeof(int), cudaMemcpyHostToDevice));
+        
+        dim3 lossGrid(batchSize, (vocabSize + 255) / 256);
+        int sharedSize = (256 + 2) * sizeof(float);
+        crossEntropyBackwardKernel<<<lossGrid, 256, sharedSize, stream>>>(d_dLogits, d_logits, d_targets, vocabSize, batchSize);
+        
+        vecMatMulBackwardInputKernel<<<(dim + 255) / 256, 256, 0, stream>>>(d_dHidden, d_dLogits, d_outputWeight, dim, vocabSize);
+        
+        for (int l = nLayers - 1; l >= 0; l--) {
+            auto& layer = gpuLayers[l];
+            auto& grads = layerGradients[l];
+            auto& cache = forwardCache[l];
+            
+            rmsNormBackwardKernel<<<1, 256, 512 * sizeof(float), stream>>>(d_dXb, grads.dFFNNorm, d_dHidden, cache.preFFNNorm, layer.ffnNorm, dim, eps);
+            
+            vecMatMulBackwardInputKernel<<<(ffnDim + 255) / 256, 256, 0, stream>>>(d_dHb, d_dXb, layer.w2, ffnDim, dim);
+            
+            dim3 w2Grid((ffnDim + 15) / 16, dim);
+            vecMatMulBackwardWeightKernel<<<w2Grid, 16, 0, stream>>>(grads.dW2, cache.ffnHidden, d_dXb, ffnDim, dim);
+            
+            swiGLUBackwardKernel<<<(ffnDim + 255) / 256, 256, 0, stream>>>(d_dHb2, d_dHb, d_dHb, cache.gate, cache.up, ffnDim);
+            
+            dim3 w1Grid((dim + 15) / 16, ffnDim);
+            vecMatMulBackwardWeightKernel<<<w1Grid, 16, 0, stream>>>(grads.dW1, cache.postFFNNorm, d_dHb2, dim, ffnDim);
+            
+            dim3 w3Grid((dim + 15) / 16, ffnDim);
+            vecMatMulBackwardWeightKernel<<<w3Grid, 16, 0, stream>>>(grads.dW3, cache.postFFNNorm, d_dHb, dim, ffnDim);
+            
+            residualBackwardKernel<<<(dim + 255) / 256, 256, 0, stream>>>(d_dHidden, d_dXb, dim);
+            
+            rmsNormBackwardKernel<<<1, 256, 512 * sizeof(float), stream>>>(d_dXb, grads.dAttnNorm, d_dHidden, cache.preAttnNorm, layer.attnNorm, dim, eps);
+            
+            vecMatMulBackwardInputKernel<<<(qDim + 255) / 256, 256, 0, stream>>>(d_dAttnOut, d_dXb, layer.wo, qDim, dim);
+            
+            dim3 woGrid((qDim + 15) / 16, dim);
+            vecMatMulBackwardWeightKernel<<<woGrid, 16, 0, stream>>>(grads.dWo, cache.attnOutput, d_dXb, qDim, dim);
+            
+            dim3 wqGrid((dim + 15) / 16, qDim);
+            vecMatMulBackwardWeightKernel<<<wqGrid, 16, 0, stream>>>(grads.dWq, cache.postAttnNorm, d_dQ, dim, qDim);
+            
+            dim3 wkGrid((dim + 15) / 16, kvDim);
+            vecMatMulBackwardWeightKernel<<<wkGrid, 16, 0, stream>>>(grads.dWk, cache.postAttnNorm, d_dK, dim, kvDim);
+            
+            dim3 wvGrid((dim + 15) / 16, kvDim);
+            vecMatMulBackwardWeightKernel<<<wvGrid, 16, 0, stream>>>(grads.dWv, cache.postAttnNorm, d_dV, dim, kvDim);
+            
+            residualBackwardKernel<<<(dim + 255) / 256, 256, 0, stream>>>(d_dHidden, d_dXb, dim);
+        }
+        
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+    
+    void optimizerStep() {
+        adamTimestep++;
+        float lr = config.learningRate;
+        float beta1 = config.beta1;
+        float beta2 = config.beta2;
+        float adamEps = config.adamEps;
+        int t = adamTimestep;
+        
+        for (int l = 0; l < nLayers; l++) {
+            auto& layer = gpuLayers[l];
+            auto& grads = layerGradients[l];
+            auto& adam = layerAdamState[l];
+            
+            #define ADAM_UPDATE(param, grad, m, v, size) \
+                adamOptimizerKernel<<<((size) + 255) / 256, 256, 0, stream>>>(param, grad, m, v, size, lr, beta1, beta2, adamEps, t);
+            
+            ADAM_UPDATE(layer.wq, grads.dWq, adam.mWq, adam.vWq, qDim * dim);
+            ADAM_UPDATE(layer.wk, grads.dWk, adam.mWk, adam.vWk, kvDim * dim);
+            ADAM_UPDATE(layer.wv, grads.dWv, adam.mWv, adam.vWv, kvDim * dim);
+            ADAM_UPDATE(layer.wo, grads.dWo, adam.mWo, adam.vWo, dim * qDim);
+            ADAM_UPDATE(layer.w1, grads.dW1, adam.mW1, adam.vW1, ffnDim * dim);
+            ADAM_UPDATE(layer.w2, grads.dW2, adam.mW2, adam.vW2, dim * ffnDim);
+            ADAM_UPDATE(layer.w3, grads.dW3, adam.mW3, adam.vW3, ffnDim * dim);
+            ADAM_UPDATE(layer.attnNorm, grads.dAttnNorm, adam.mAttnNorm, adam.vAttnNorm, dim);
+            ADAM_UPDATE(layer.ffnNorm, grads.dFFNNorm, adam.mFFNNorm, adam.vFFNNorm, dim);
+            
+            #undef ADAM_UPDATE
+        }
+        
+        size_t embSize = (size_t)vocabSize * dim;
+        adamOptimizerKernel<<<(embSize + 255) / 256, 256, 0, stream>>>(d_embeddings, d_dEmbeddings, d_mEmbeddings, d_vEmbeddings, embSize, lr, beta1, beta2, adamEps, t);
+        adamOptimizerKernel<<<(dim + 255) / 256, 256, 0, stream>>>(d_normWeight, d_dNormWeight, d_mNormWeight, d_vNormWeight, dim, lr, beta1, beta2, adamEps, t);
+        
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+    
+    void zeroGradients() {
+        for (int l = 0; l < nLayers; l++) {
+            auto& grads = layerGradients[l];
+            CUDA_CHECK(cudaMemsetAsync(grads.dAttnNorm, 0, dim * sizeof(float), stream));
+            CUDA_CHECK(cudaMemsetAsync(grads.dFFNNorm, 0, dim * sizeof(float), stream));
+            CUDA_CHECK(cudaMemsetAsync(grads.dWq, 0, (size_t)qDim * dim * sizeof(float), stream));
+            CUDA_CHECK(cudaMemsetAsync(grads.dWk, 0, (size_t)kvDim * dim * sizeof(float), stream));
+            CUDA_CHECK(cudaMemsetAsync(grads.dWv, 0, (size_t)kvDim * dim * sizeof(float), stream));
+            CUDA_CHECK(cudaMemsetAsync(grads.dWo, 0, (size_t)dim * qDim * sizeof(float), stream));
+            CUDA_CHECK(cudaMemsetAsync(grads.dW1, 0, (size_t)ffnDim * dim * sizeof(float), stream));
+            CUDA_CHECK(cudaMemsetAsync(grads.dW2, 0, (size_t)dim * ffnDim * sizeof(float), stream));
+            CUDA_CHECK(cudaMemsetAsync(grads.dW3, 0, (size_t)ffnDim * dim * sizeof(float), stream));
+        }
+        size_t embSize = (size_t)vocabSize * dim;
+        CUDA_CHECK(cudaMemsetAsync(d_dEmbeddings, 0, embSize * sizeof(float), stream));
+        CUDA_CHECK(cudaMemsetAsync(d_dNormWeight, 0, dim * sizeof(float), stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+    
+    float trainStep(const std::vector<int>& inputTokens, const std::vector<int>& targetTokens) {
+        zeroGradients();
+        forwardTraining(inputTokens);
+        float loss = computeLoss(targetTokens);
+        backward(inputTokens, targetTokens);
+        optimizerStep();
+        return loss;
+    }
+    
+    void inspectGradients(int layerIdx, const std::string& paramName, float* outGradients, int maxElements) {
+        if (layerIdx < 0 || layerIdx >= nLayers) return;
+        
+        float* srcGrad = nullptr;
+        int totalSize = 0;
+        
+        if (paramName == "wq") { srcGrad = layerGradients[layerIdx].dWq; totalSize = qDim * dim; }
+        else if (paramName == "wk") { srcGrad = layerGradients[layerIdx].dWk; totalSize = kvDim * dim; }
+        else if (paramName == "wv") { srcGrad = layerGradients[layerIdx].dWv; totalSize = kvDim * dim; }
+        else if (paramName == "wo") { srcGrad = layerGradients[layerIdx].dWo; totalSize = dim * qDim; }
+        
+        if (srcGrad && totalSize > 0) {
+            int copySize = std::min(maxElements, totalSize);
+            CUDA_CHECK(cudaMemcpyAsync(h_pinnedGradients, srcGrad, copySize * sizeof(float), cudaMemcpyDeviceToHost, transferStream));
+            CUDA_CHECK(cudaStreamSynchronize(transferStream));
+            memcpy(outGradients, h_pinnedGradients, copySize * sizeof(float));
+        }
+    }
+    
+    float getGradientNorm() {
+        CUDA_CHECK(cudaMemset(d_gradNorm, 0, sizeof(float)));
+        for (int l = 0; l < nLayers; l++) {
+            auto& grads = layerGradients[l];
+            gradientClipKernel<<<64, 256, 0, stream>>>(grads.dWq, qDim * dim, INFINITY, d_gradNorm);
+            gradientClipKernel<<<64, 256, 0, stream>>>(grads.dWk, kvDim * dim, INFINITY, d_gradNorm);
+            gradientClipKernel<<<64, 256, 0, stream>>>(grads.dWv, kvDim * dim, INFINITY, d_gradNorm);
+            gradientClipKernel<<<64, 256, 0, stream>>>(grads.dWo, dim * qDim, INFINITY, d_gradNorm);
+        }
+        float norm;
+        CUDA_CHECK(cudaMemcpy(&norm, d_gradNorm, sizeof(float), cudaMemcpyDeviceToHost));
+        return sqrtf(norm);
+    }
+    
+    int getTimestep() const { return adamTimestep; }
+    bool isInitialized() const { return initialized; }
+    size_t getTotalParams() const { return totalParams; }
+    void setLearningRate(float lr) { config.learningRate = lr; }
+};
+
 } // namespace DistTransformer
 
 // ================================================================================
@@ -4284,6 +5198,16 @@ void printMainHelp(const char* progName) {
     std::cout << "    --network               Test network layer" << std::endl;
     std::cout << "    --verbose               Enable verbose test output" << std::endl;
     std::cout << "    --help                  Show test help\n" << std::endl;
+
+    std::cout << "  train                     Fine-tune transformer with backpropagation" << std::endl;
+    std::cout << "    -m, --model <path>      Path to GGUF model file (required)" << std::endl;
+    std::cout << "    --lr <n>                Learning rate (default: 1e-4)" << std::endl;
+    std::cout << "    --epochs <n>            Number of training epochs (default: 1)" << std::endl;
+    std::cout << "    --batch-size <n>        Batch size (default: 1)" << std::endl;
+    std::cout << "    --grad-clip <n>         Gradient clipping norm (default: 1.0)" << std::endl;
+    std::cout << "    --train-text <text>     Training text for fine-tuning" << std::endl;
+    std::cout << "    --verbose               Show training progress" << std::endl;
+    std::cout << "    --help                  Show training help\n" << std::endl;
 
     std::cout << "QUANTIZATION TYPES:\n" << std::endl;
     std::cout << "  none                      Full precision float32 (32 bpw)" << std::endl;
@@ -4951,6 +5875,130 @@ int main(int argc, char* argv[]) {
                 generator.generate(formatted, genCfg);
             }
         }
+        
+        return 0;
+
+    } else if (command == "train") {
+        std::string modelPath;
+        std::string trainText;
+        TrainingConfig trainCfg;
+        int epochs = 1;
+        bool verbose = false;
+        
+        for (int i = 2; i < argc; i++) {
+            std::string arg = argv[i];
+            if ((arg == "-m" || arg == "--model") && i + 1 < argc) {
+                modelPath = argv[++i];
+            } else if (arg == "--lr" && i + 1 < argc) {
+                trainCfg.learningRate = std::stof(argv[++i]);
+            } else if (arg == "--epochs" && i + 1 < argc) {
+                epochs = std::stoi(argv[++i]);
+            } else if (arg == "--batch-size" && i + 1 < argc) {
+                trainCfg.batchSize = std::stoi(argv[++i]);
+            } else if (arg == "--grad-clip" && i + 1 < argc) {
+                trainCfg.gradientClipNorm = std::stof(argv[++i]);
+            } else if (arg == "--train-text" && i + 1 < argc) {
+                trainText = argv[++i];
+            } else if (arg == "--verbose") {
+                verbose = true;
+            } else if (arg == "--help") {
+                std::cout << "\nTRAIN MODE - Fine-tune transformer with backpropagation\n" << std::endl;
+                std::cout << "Usage: " << argv[0] << " train -m <model.gguf> [options]\n" << std::endl;
+                std::cout << "OPTIONS:" << std::endl;
+                std::cout << "  -m, --model <path>      Path to GGUF model file (required)" << std::endl;
+                std::cout << "  --lr <n>                Learning rate (default: 1e-4)" << std::endl;
+                std::cout << "  --epochs <n>            Number of training epochs (default: 1)" << std::endl;
+                std::cout << "  --batch-size <n>        Batch size (default: 1)" << std::endl;
+                std::cout << "  --grad-clip <n>         Gradient clipping norm (default: 1.0)" << std::endl;
+                std::cout << "  --train-text <text>     Training text for fine-tuning" << std::endl;
+                std::cout << "  --verbose               Show training progress" << std::endl;
+                std::cout << "  --help                  Show this help\n" << std::endl;
+                std::cout << "TRAINING FEATURES:" << std::endl;
+                std::cout << "  - Full backpropagation through all transformer layers" << std::endl;
+                std::cout << "  - Adam optimizer with bias correction" << std::endl;
+                std::cout << "  - Gradient clipping for stability" << std::endl;
+                std::cout << "  - Activation caching for efficient backprop" << std::endl;
+                std::cout << "  - Cross-entropy loss with fused softmax" << std::endl;
+                std::cout << "  - Gradient inspection for debugging\n" << std::endl;
+                return 0;
+            }
+        }
+        
+        if (modelPath.empty()) {
+            std::cerr << "Error: Model path required (-m <path>)" << std::endl;
+            return 1;
+        }
+        
+        std::cout << "\n=== Transformer Training ===" << std::endl;
+        std::cout << "Model: " << modelPath << std::endl;
+        std::cout << "Learning rate: " << trainCfg.learningRate << std::endl;
+        std::cout << "Epochs: " << epochs << std::endl;
+        std::cout << "Batch size: " << trainCfg.batchSize << std::endl;
+        std::cout << "Gradient clip: " << trainCfg.gradientClipNorm << std::endl;
+        std::cout << "============================\n" << std::endl;
+        
+        GGUFLoader model;
+        if (!model.loadFromFile(modelPath)) {
+            std::cerr << "Failed to load model: " << modelPath << std::endl;
+            return 1;
+        }
+        
+        ChatTokenizer tokenizer;
+        if (!tokenizer.loadFromGGUF(model.getTokens(), model.getArchitecture())) {
+            std::cerr << "Failed to load tokenizer from model" << std::endl;
+            return 1;
+        }
+        
+        GPUTrainer trainer;
+        if (!trainer.initialize(&model, &tokenizer, trainCfg)) {
+            std::cerr << "Failed to initialize trainer" << std::endl;
+            return 1;
+        }
+        
+        std::cout << "[Training] Initialized with " << trainer.getTotalParams() / 1e6 << "M parameters" << std::endl;
+        
+        if (trainText.empty()) {
+            trainText = "The quick brown fox jumps over the lazy dog.";
+            std::cout << "[Training] Using default training text: \"" << trainText << "\"" << std::endl;
+        }
+        
+        std::vector<int> inputTokens = tokenizer.encode(trainText);
+        std::vector<int> targetTokens;
+        
+        if (inputTokens.size() > 1) {
+            targetTokens.assign(inputTokens.begin() + 1, inputTokens.end());
+            inputTokens.pop_back();
+        } else {
+            std::cerr << "Error: Training text too short" << std::endl;
+            return 1;
+        }
+        
+        std::cout << "[Training] Input tokens: " << inputTokens.size() << std::endl;
+        std::cout << "[Training] Target tokens: " << targetTokens.size() << std::endl;
+        
+        auto startTime = std::chrono::high_resolution_clock::now();
+        
+        for (int epoch = 0; epoch < epochs; epoch++) {
+            float loss = trainer.trainStep(inputTokens, targetTokens);
+            
+            if (verbose || (epoch + 1) % 10 == 0 || epoch == 0) {
+                float gradNorm = trainer.getGradientNorm();
+                std::cout << "Epoch " << (epoch + 1) << "/" << epochs 
+                          << " - Loss: " << std::fixed << std::setprecision(4) << loss
+                          << " - Grad norm: " << std::setprecision(6) << gradNorm << std::endl;
+            }
+            
+            if (trainCfg.gradientClipNorm > 0) {
+                trainer.clipGradients(trainCfg.gradientClipNorm);
+            }
+        }
+        
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+        
+        std::cout << "\n[Training] Complete in " << duration.count() << "ms" << std::endl;
+        std::cout << "[Training] Final loss: " << std::fixed << std::setprecision(4) 
+                  << trainer.trainStep(inputTokens, targetTokens) << std::endl;
         
         return 0;
 

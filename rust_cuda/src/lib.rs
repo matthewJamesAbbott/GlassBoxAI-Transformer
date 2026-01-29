@@ -7,6 +7,7 @@ pub mod kernels;
 pub mod generator;
 pub mod protocol;
 pub mod network;
+pub mod trainer;
 
 pub use error::TransformerError;
 pub use gguf::GGUFLoader;
@@ -21,4 +22,8 @@ pub use network::{
     TransformerServer, TransformerClient,
     DistributedTransformer, DistributedTransformerServer,
     benchmark_distributed,
+};
+pub use trainer::{
+    GpuTrainer, TrainingConfig, LayerGradients, LayerAdamState,
+    ForwardActivations, LayerWeightsRef, LayerWeightsMut,
 };

@@ -1,7 +1,7 @@
 // CUDA kernels for transformer inference using cudarc NVRTC
 // Fused Unsloth-style kernels for 2x speed, 70% VRAM reduction
 
-use cudarc::driver::{CudaDevice, CudaSlice, CudaFunction, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaDevice, CudaSlice, CudaFunction, LaunchAsync, LaunchConfig, DevicePtr};
 
 use std::sync::Arc;
 use crate::error::{Result, TransformerError};
@@ -496,6 +496,313 @@ __global__ void vecMatMulQ2K_Kernel(
     out[n] = sum;
 }
 
+// ============================================================================
+// BACKWARD PASS KERNELS FOR TRAINING
+// ============================================================================
+
+__global__ void crossEntropyBackwardKernel(
+    float* __restrict__ dLogits,
+    const float* __restrict__ logits,
+    const int* __restrict__ targets,
+    int vocabSize,
+    int batchSize
+) {
+    int b = blockIdx.x;
+    int v = threadIdx.x + blockIdx.y * blockDim.x;
+    
+    if (b >= batchSize || v >= vocabSize) return;
+    
+    extern __shared__ float smem[];
+    float* maxVal = smem;
+    float* sumExp = smem + 1;
+    
+    const float* logitsRow = logits + b * vocabSize;
+    float* dLogitsRow = dLogits + b * vocabSize;
+    int target = targets[b];
+    
+    float localMax = -INFINITY;
+    for (int i = v; i < vocabSize; i += blockDim.x) {
+        localMax = fmaxf(localMax, logitsRow[i]);
+    }
+    smem[threadIdx.x + 2] = localMax;
+    __syncthreads();
+    
+    if (threadIdx.x == 0) {
+        *maxVal = smem[2];
+        for (int i = 1; i < blockDim.x && i < vocabSize; i++) {
+            *maxVal = fmaxf(*maxVal, smem[i + 2]);
+        }
+        *sumExp = 0.0f;
+    }
+    __syncthreads();
+    
+    float localSum = 0.0f;
+    for (int i = v; i < vocabSize; i += blockDim.x) {
+        localSum += expf(logitsRow[i] - *maxVal);
+    }
+    atomicAdd(sumExp, localSum);
+    __syncthreads();
+    
+    for (int i = v; i < vocabSize; i += blockDim.x) {
+        float prob = expf(logitsRow[i] - *maxVal) / (*sumExp + 1e-10f);
+        dLogitsRow[i] = (prob - (i == target ? 1.0f : 0.0f)) / batchSize;
+    }
+}
+
+__global__ void vecMatMulBackwardInputKernel(
+    float* __restrict__ dInput,
+    const float* __restrict__ dOutput,
+    const float* __restrict__ weight,
+    int K,
+    int N
+) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= K) return;
+    
+    float sum = 0.0f;
+    for (int n = 0; n < N; n++) {
+        sum += dOutput[n] * weight[n * K + k];
+    }
+    dInput[k] = sum;
+}
+
+__global__ void vecMatMulBackwardWeightKernel(
+    float* __restrict__ dWeight,
+    const float* __restrict__ input,
+    const float* __restrict__ dOutput,
+    int K,
+    int N
+) {
+    int n = blockIdx.y;
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (k >= K || n >= N) return;
+    
+    atomicAdd(&dWeight[n * K + k], dOutput[n] * input[k]);
+}
+
+__global__ void rmsNormBackwardKernel(
+    float* __restrict__ dInput,
+    float* __restrict__ dWeight,
+    const float* __restrict__ dOutput,
+    const float* __restrict__ input,
+    const float* __restrict__ weight,
+    int dim,
+    float eps
+) {
+    extern __shared__ float smem[];
+    
+    int idx = threadIdx.x;
+    
+    float localSS = 0.0f;
+    for (int i = idx; i < dim; i += blockDim.x) {
+        float val = input[i];
+        localSS += val * val;
+    }
+    smem[idx] = localSS;
+    __syncthreads();
+    
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (idx < s) smem[idx] += smem[idx + s];
+        __syncthreads();
+    }
+    
+    float ss = smem[0];
+    float rms = rsqrtf(ss / dim + eps);
+    float rms3 = rms * rms * rms;
+    
+    float sumGradNorm = 0.0f;
+    for (int i = idx; i < dim; i += blockDim.x) {
+        sumGradNorm += dOutput[i] * weight[i] * input[i];
+    }
+    smem[idx] = sumGradNorm;
+    __syncthreads();
+    
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (idx < s) smem[idx] += smem[idx + s];
+        __syncthreads();
+    }
+    sumGradNorm = smem[0];
+    
+    for (int i = idx; i < dim; i += blockDim.x) {
+        float x = input[i];
+        float dNorm = dOutput[i] * weight[i];
+        float dX = dNorm * rms - x * rms3 * sumGradNorm / dim;
+        dInput[i] = dX;
+        atomicAdd(&dWeight[i], dOutput[i] * x * rms);
+    }
+}
+
+__global__ void ropeBackwardKernel(
+    float* __restrict__ dQ,
+    float* __restrict__ dK,
+    int qDim,
+    int kvDim,
+    int headDim,
+    int position,
+    float theta,
+    float ropeScale
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    float scaledPos = position / ropeScale;
+    
+    if (idx < qDim / 2) {
+        int i = idx * 2;
+        int headIdx = i % headDim;
+        float freq = 1.0f / powf(theta, (float)headIdx / headDim);
+        float angle = scaledPos * freq;
+        float cs = cosf(angle), sn = sinf(angle);
+        
+        float dq0 = dQ[i], dq1 = dQ[i + 1];
+        dQ[i] = dq0 * cs + dq1 * sn;
+        dQ[i + 1] = -dq0 * sn + dq1 * cs;
+    }
+    
+    if (dK != NULL && idx < kvDim / 2) {
+        int i = idx * 2;
+        int headIdx = i % headDim;
+        float freq = 1.0f / powf(theta, (float)headIdx / headDim);
+        float angle = scaledPos * freq;
+        float cs = cosf(angle), sn = sinf(angle);
+        
+        float dk0 = dK[i], dk1 = dK[i + 1];
+        dK[i] = dk0 * cs + dk1 * sn;
+        dK[i + 1] = -dk0 * sn + dk1 * cs;
+    }
+}
+
+__global__ void swiGLUBackwardKernel(
+    float* __restrict__ dGate,
+    float* __restrict__ dUp,
+    const float* __restrict__ dOutput,
+    const float* __restrict__ gate,
+    const float* __restrict__ up,
+    int size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= size) return;
+    
+    float g = gate[i];
+    float u = up[i];
+    float sigmoid_g = 1.0f / (1.0f + expf(-g));
+    float silu_g = g * sigmoid_g;
+    float dsilu_dg = sigmoid_g + g * sigmoid_g * (1.0f - sigmoid_g);
+    
+    dUp[i] = dOutput[i] * silu_g;
+    dGate[i] = dOutput[i] * u * dsilu_dg;
+}
+
+__global__ void residualBackwardKernel(
+    float* __restrict__ dResidual,
+    const float* __restrict__ dOutput,
+    int size
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        atomicAdd(&dResidual[i], dOutput[i]);
+    }
+}
+
+__global__ void adamOptimizerKernel(
+    float* __restrict__ params,
+    const float* __restrict__ grads,
+    float* __restrict__ m,
+    float* __restrict__ v,
+    int numParams,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    int t
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numParams) return;
+    
+    float g = grads[idx];
+    float m_t = beta1 * m[idx] + (1.0f - beta1) * g;
+    float v_t = beta2 * v[idx] + (1.0f - beta2) * g * g;
+    
+    m[idx] = m_t;
+    v[idx] = v_t;
+    
+    float m_hat = m_t / (1.0f - powf(beta1, t));
+    float v_hat = v_t / (1.0f - powf(beta2, t));
+    
+    params[idx] -= lr * m_hat / (sqrtf(v_hat) + eps);
+}
+
+__global__ void zeroGradientsKernel(float* grads, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        grads[idx] = 0.0f;
+    }
+}
+
+__global__ void computeLossKernel(
+    float* __restrict__ loss,
+    const float* __restrict__ logits,
+    const int* __restrict__ targets,
+    int vocabSize,
+    int batchSize
+) {
+    if (threadIdx.x == 0) {
+        float totalLoss = 0.0f;
+        
+        for (int b = 0; b < batchSize; b++) {
+            const float* row = logits + b * vocabSize;
+            int target = targets[b];
+            
+            float localMax = row[0];
+            for (int i = 1; i < vocabSize; i++) {
+                localMax = fmaxf(localMax, row[i]);
+            }
+            
+            float sumE = 0.0f;
+            for (int i = 0; i < vocabSize; i++) {
+                sumE += expf(row[i] - localMax);
+            }
+            
+            float logProb = row[target] - localMax - logf(sumE + 1e-10f);
+            totalLoss -= logProb;
+        }
+        
+        *loss = totalLoss / batchSize;
+    }
+}
+
+__global__ void gradientClipKernel(
+    float* __restrict__ grads,
+    int numParams,
+    float maxNorm,
+    float* __restrict__ globalNorm
+) {
+    __shared__ float localSum;
+    
+    if (threadIdx.x == 0) localSum = 0.0f;
+    __syncthreads();
+    
+    float threadSum = 0.0f;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < numParams; i += blockDim.x * gridDim.x) {
+        float g = grads[i];
+        threadSum += g * g;
+    }
+    atomicAdd(&localSum, threadSum);
+    __syncthreads();
+    
+    if (threadIdx.x == 0) {
+        atomicAdd(globalNorm, localSum);
+    }
+    __syncthreads();
+    
+    float norm = sqrtf(*globalNorm);
+    if (norm > maxNorm) {
+        float scale = maxNorm / norm;
+        for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < numParams; i += blockDim.x * gridDim.x) {
+            grads[i] *= scale;
+        }
+    }
+}
+
 } // extern "C"
 "#;
 
@@ -516,6 +823,18 @@ pub struct CudaKernels {
     vec_mat_mul_q6k: CudaFunction,
     vec_mat_mul_q8_0: CudaFunction,
     vec_mat_mul_q2k: CudaFunction,
+    // Backward pass kernels for training
+    cross_entropy_backward: CudaFunction,
+    vec_mat_mul_backward_input: CudaFunction,
+    vec_mat_mul_backward_weight: CudaFunction,
+    rms_norm_backward: CudaFunction,
+    rope_backward: CudaFunction,
+    swiglu_backward: CudaFunction,
+    residual_backward: CudaFunction,
+    adam_optimizer: CudaFunction,
+    zero_gradients: CudaFunction,
+    compute_loss: CudaFunction,
+    gradient_clip: CudaFunction,
 }
 
 impl CudaKernels {
@@ -538,6 +857,18 @@ impl CudaKernels {
             "vecMatMulQ6K_Kernel",
             "vecMatMulQ8_0_Kernel",
             "vecMatMulQ2K_Kernel",
+            // Backward pass kernels
+            "crossEntropyBackwardKernel",
+            "vecMatMulBackwardInputKernel",
+            "vecMatMulBackwardWeightKernel",
+            "rmsNormBackwardKernel",
+            "ropeBackwardKernel",
+            "swiGLUBackwardKernel",
+            "residualBackwardKernel",
+            "adamOptimizerKernel",
+            "zeroGradientsKernel",
+            "computeLossKernel",
+            "gradientClipKernel",
         ]).map_err(|e| TransformerError::Cuda(format!("PTX load error: {}", e)))?;
         
         let rms_norm = device.get_func("transformer_kernels", "fusedRMSNormKernel")
@@ -569,6 +900,30 @@ impl CudaKernels {
         let vec_mat_mul_q2k = device.get_func("transformer_kernels", "vecMatMulQ2K_Kernel")
             .ok_or_else(|| TransformerError::Cuda("Failed to get vecMatMulQ2K_Kernel".into()))?;
         
+        // Load backward pass kernels
+        let cross_entropy_backward = device.get_func("transformer_kernels", "crossEntropyBackwardKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get crossEntropyBackwardKernel".into()))?;
+        let vec_mat_mul_backward_input = device.get_func("transformer_kernels", "vecMatMulBackwardInputKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get vecMatMulBackwardInputKernel".into()))?;
+        let vec_mat_mul_backward_weight = device.get_func("transformer_kernels", "vecMatMulBackwardWeightKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get vecMatMulBackwardWeightKernel".into()))?;
+        let rms_norm_backward = device.get_func("transformer_kernels", "rmsNormBackwardKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get rmsNormBackwardKernel".into()))?;
+        let rope_backward = device.get_func("transformer_kernels", "ropeBackwardKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get ropeBackwardKernel".into()))?;
+        let swiglu_backward = device.get_func("transformer_kernels", "swiGLUBackwardKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get swiGLUBackwardKernel".into()))?;
+        let residual_backward = device.get_func("transformer_kernels", "residualBackwardKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get residualBackwardKernel".into()))?;
+        let adam_optimizer = device.get_func("transformer_kernels", "adamOptimizerKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get adamOptimizerKernel".into()))?;
+        let zero_gradients = device.get_func("transformer_kernels", "zeroGradientsKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get zeroGradientsKernel".into()))?;
+        let compute_loss = device.get_func("transformer_kernels", "computeLossKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get computeLossKernel".into()))?;
+        let gradient_clip = device.get_func("transformer_kernels", "gradientClipKernel")
+            .ok_or_else(|| TransformerError::Cuda("Failed to get gradientClipKernel".into()))?;
+        
         Ok(Self {
             device,
             rms_norm,
@@ -585,6 +940,17 @@ impl CudaKernels {
             vec_mat_mul_q6k,
             vec_mat_mul_q8_0,
             vec_mat_mul_q2k,
+            cross_entropy_backward,
+            vec_mat_mul_backward_input,
+            vec_mat_mul_backward_weight,
+            rms_norm_backward,
+            rope_backward,
+            swiglu_backward,
+            residual_backward,
+            adam_optimizer,
+            zero_gradients,
+            compute_loss,
+            gradient_clip,
         })
     }
     
@@ -970,5 +1336,341 @@ impl CudaKernels {
                 self.vec_mat_mul_quantized(output, vec, slice, k, n, *dtype)
             }
         }
+    }
+    
+    // ========================================================================
+    // BACKWARD PASS KERNEL WRAPPERS FOR TRAINING
+    // ========================================================================
+    
+    pub fn cross_entropy_backward(
+        &self,
+        d_logits: &mut CudaSlice<f32>,
+        logits: &CudaSlice<f32>,
+        targets: &CudaSlice<i32>,
+        vocab_size: usize,
+        batch_size: usize,
+    ) -> Result<()> {
+        let grid_dim = (batch_size as u32, ((vocab_size + 255) / 256) as u32, 1);
+        let shared_mem = (256 + 2) * std::mem::size_of::<f32>();
+        
+        let cfg = LaunchConfig {
+            grid_dim,
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: shared_mem as u32,
+        };
+        
+        unsafe {
+            self.cross_entropy_backward.clone().launch(cfg, (
+                d_logits,
+                logits,
+                targets,
+                vocab_size as i32,
+                batch_size as i32,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("CrossEntropyBackward launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn vec_mat_mul_backward_input(
+        &self,
+        d_input: &mut CudaSlice<f32>,
+        d_output: &CudaSlice<f32>,
+        weight: &CudaSlice<f32>,
+        k: usize,
+        n: usize,
+    ) -> Result<()> {
+        let blocks = (k + 255) / 256;
+        
+        let cfg = LaunchConfig {
+            grid_dim: (blocks as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        unsafe {
+            self.vec_mat_mul_backward_input.clone().launch(cfg, (
+                d_input,
+                d_output,
+                weight,
+                k as i32,
+                n as i32,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("VecMatMulBackwardInput launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn vec_mat_mul_backward_weight(
+        &self,
+        d_weight: &mut CudaSlice<f32>,
+        input: &CudaSlice<f32>,
+        d_output: &CudaSlice<f32>,
+        k: usize,
+        n: usize,
+    ) -> Result<()> {
+        let cfg = LaunchConfig {
+            grid_dim: (((k + 15) / 16) as u32, n as u32, 1),
+            block_dim: (16, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        unsafe {
+            self.vec_mat_mul_backward_weight.clone().launch(cfg, (
+                d_weight,
+                input,
+                d_output,
+                k as i32,
+                n as i32,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("VecMatMulBackwardWeight launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn rms_norm_backward(
+        &self,
+        d_input: &mut CudaSlice<f32>,
+        d_weight: &mut CudaSlice<f32>,
+        d_output: &CudaSlice<f32>,
+        input: &CudaSlice<f32>,
+        weight: &CudaSlice<f32>,
+        dim: usize,
+        eps: f32,
+    ) -> Result<()> {
+        let shared_mem = 512 * std::mem::size_of::<f32>();
+        
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: shared_mem as u32,
+        };
+        
+        unsafe {
+            self.rms_norm_backward.clone().launch(cfg, (
+                d_input,
+                d_weight,
+                d_output,
+                input,
+                weight,
+                dim as i32,
+                eps,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("RMSNormBackward launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn rope_backward(
+        &self,
+        d_q: &mut CudaSlice<f32>,
+        d_k: Option<&mut CudaSlice<f32>>,
+        q_dim: usize,
+        kv_dim: usize,
+        head_dim: usize,
+        position: usize,
+        theta: f32,
+        rope_scale: f32,
+    ) -> Result<()> {
+        let max_dim = q_dim.max(kv_dim);
+        let blocks = (max_dim / 2 + 255) / 256;
+        
+        let cfg = LaunchConfig {
+            grid_dim: (blocks as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        let d_k_ptr: u64 = match d_k {
+            Some(slice) => *slice.device_ptr(),
+            None => 0,
+        };
+        
+        unsafe {
+            self.rope_backward.clone().launch(cfg, (
+                d_q,
+                d_k_ptr,
+                q_dim as i32,
+                kv_dim as i32,
+                head_dim as i32,
+                position as i32,
+                theta,
+                rope_scale,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("RoPEBackward launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn swiglu_backward(
+        &self,
+        d_gate: &mut CudaSlice<f32>,
+        d_up: &mut CudaSlice<f32>,
+        d_output: &CudaSlice<f32>,
+        gate: &CudaSlice<f32>,
+        up: &CudaSlice<f32>,
+        size: usize,
+    ) -> Result<()> {
+        let blocks = (size + 255) / 256;
+        
+        let cfg = LaunchConfig {
+            grid_dim: (blocks as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        unsafe {
+            self.swiglu_backward.clone().launch(cfg, (
+                d_gate,
+                d_up,
+                d_output,
+                gate,
+                up,
+                size as i32,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("SwiGLUBackward launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn residual_backward(
+        &self,
+        d_residual: &mut CudaSlice<f32>,
+        d_output: &CudaSlice<f32>,
+        size: usize,
+    ) -> Result<()> {
+        let blocks = (size + 255) / 256;
+        
+        let cfg = LaunchConfig {
+            grid_dim: (blocks as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        unsafe {
+            self.residual_backward.clone().launch(cfg, (
+                d_residual,
+                d_output,
+                size as i32,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("ResidualBackward launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn adam_optimizer(
+        &self,
+        params: &mut CudaSlice<f32>,
+        grads: &CudaSlice<f32>,
+        m: &mut CudaSlice<f32>,
+        v: &mut CudaSlice<f32>,
+        num_params: usize,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        t: i32,
+    ) -> Result<()> {
+        let blocks = (num_params + 255) / 256;
+        
+        let cfg = LaunchConfig {
+            grid_dim: (blocks as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        unsafe {
+            self.adam_optimizer.clone().launch(cfg, (
+                params,
+                grads,
+                m,
+                v,
+                num_params as i32,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                t,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("AdamOptimizer launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn zero_gradients(
+        &self,
+        grads: &mut CudaSlice<f32>,
+        size: usize,
+    ) -> Result<()> {
+        let blocks = (size + 255) / 256;
+        
+        let cfg = LaunchConfig {
+            grid_dim: (blocks as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        unsafe {
+            self.zero_gradients.clone().launch(cfg, (
+                grads,
+                size as i32,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("ZeroGradients launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn compute_loss(
+        &self,
+        loss: &mut CudaSlice<f32>,
+        logits: &CudaSlice<f32>,
+        targets: &CudaSlice<i32>,
+        vocab_size: usize,
+        batch_size: usize,
+    ) -> Result<()> {
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (1, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        unsafe {
+            self.compute_loss.clone().launch(cfg, (
+                loss,
+                logits,
+                targets,
+                vocab_size as i32,
+                batch_size as i32,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("ComputeLoss launch error: {}", e)))?;
+        
+        Ok(())
+    }
+    
+    pub fn gradient_clip(
+        &self,
+        grads: &mut CudaSlice<f32>,
+        num_params: usize,
+        max_norm: f32,
+        global_norm: &mut CudaSlice<f32>,
+    ) -> Result<()> {
+        let blocks = ((num_params + 255) / 256).min(256);
+        
+        let cfg = LaunchConfig {
+            grid_dim: (blocks as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        
+        unsafe {
+            self.gradient_clip.clone().launch(cfg, (
+                grads,
+                num_params as i32,
+                max_norm,
+                global_norm,
+            ))
+        }.map_err(|e| TransformerError::Cuda(format!("GradientClip launch error: {}", e)))?;
+        
+        Ok(())
     }
 }
