@@ -30,3 +30,6 @@ pub mod quant;
 
 #[cfg(kani)]
 pub mod model;
+
+#[cfg(kani)]
+pub mod trainer;

@@ -891,13 +891,20 @@ static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
         std::cerr << "sendRawFrame: socket is invalid" << std::endl;
         return false;
     }
+    
+    if (!destMAC || !srcMAC) {
+        std::cerr << "sendRawFrame: invalid MAC addresses" << std::endl;
+        return false;
+    }
 
-    std::vector<uint8_t> frame(14 + payload.size());
-    memcpy(&frame[0], destMAC, 6);
-    memcpy(&frame[6], srcMAC, 6);
+    std::vector<uint8_t> frame;
+    frame.reserve(14 + payload.size());
+    frame.insert(frame.end(), destMAC, destMAC + 6);
+    frame.insert(frame.end(), srcMAC, srcMAC + 6);
     uint16_t etherType = htons(DTX_ETHERTYPE);
-    memcpy(&frame[12], &etherType, 2);
-    memcpy(&frame[14], payload.data(), payload.size());
+    frame.push_back(static_cast<uint8_t>(etherType >> 8));
+    frame.push_back(static_cast<uint8_t>(etherType & 0xFF));
+    frame.insert(frame.end(), payload.begin(), payload.end());
 
     struct sockaddr_ll addr;
     memset(&addr, 0, sizeof(addr));
@@ -5113,6 +5120,24 @@ public:
     bool isInitialized() const { return initialized; }
     size_t getTotalParams() const { return totalParams; }
     void setLearningRate(float lr) { config.learningRate = lr; }
+    
+    void clipGradients(float maxNorm) {
+        float currentNorm = getGradientNorm();
+        if (currentNorm > maxNorm && currentNorm > 0) {
+            float scale = maxNorm / currentNorm;
+            for (int l = 0; l < nLayers; l++) {
+                auto& grads = layerGradients[l];
+                gradientClipKernel<<<64, 256, 0, stream>>>(grads.dWq, qDim * dim, maxNorm, d_gradNorm);
+                gradientClipKernel<<<64, 256, 0, stream>>>(grads.dWk, kvDim * dim, maxNorm, d_gradNorm);
+                gradientClipKernel<<<64, 256, 0, stream>>>(grads.dWv, kvDim * dim, maxNorm, d_gradNorm);
+                gradientClipKernel<<<64, 256, 0, stream>>>(grads.dWo, dim * qDim, maxNorm, d_gradNorm);
+                gradientClipKernel<<<64, 256, 0, stream>>>(grads.dW1, ffnDim * dim, maxNorm, d_gradNorm);
+                gradientClipKernel<<<64, 256, 0, stream>>>(grads.dW2, dim * ffnDim, maxNorm, d_gradNorm);
+                gradientClipKernel<<<64, 256, 0, stream>>>(grads.dW3, ffnDim * dim, maxNorm, d_gradNorm);
+            }
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+        }
+    }
 };
 
 } // namespace DistTransformer
@@ -5206,6 +5231,7 @@ void printMainHelp(const char* progName) {
     std::cout << "    --batch-size <n>        Batch size (default: 1)" << std::endl;
     std::cout << "    --grad-clip <n>         Gradient clipping norm (default: 1.0)" << std::endl;
     std::cout << "    --train-text <text>     Training text for fine-tuning" << std::endl;
+    std::cout << "    --train-file <path>     Load training text from file" << std::endl;
     std::cout << "    --verbose               Show training progress" << std::endl;
     std::cout << "    --help                  Show training help\n" << std::endl;
 
@@ -5881,7 +5907,8 @@ int main(int argc, char* argv[]) {
     } else if (command == "train") {
         std::string modelPath;
         std::string trainText;
-        TrainingConfig trainCfg;
+        std::string trainFile;
+        DistTransformer::TrainingConfig trainCfg;
         int epochs = 1;
         bool verbose = false;
         
@@ -5899,6 +5926,8 @@ int main(int argc, char* argv[]) {
                 trainCfg.gradientClipNorm = std::stof(argv[++i]);
             } else if (arg == "--train-text" && i + 1 < argc) {
                 trainText = argv[++i];
+            } else if (arg == "--train-file" && i + 1 < argc) {
+                trainFile = argv[++i];
             } else if (arg == "--verbose") {
                 verbose = true;
             } else if (arg == "--help") {
@@ -5911,6 +5940,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --batch-size <n>        Batch size (default: 1)" << std::endl;
                 std::cout << "  --grad-clip <n>         Gradient clipping norm (default: 1.0)" << std::endl;
                 std::cout << "  --train-text <text>     Training text for fine-tuning" << std::endl;
+                std::cout << "  --train-file <path>     Load training text from file (whitespace-delimited)" << std::endl;
                 std::cout << "  --verbose               Show training progress" << std::endl;
                 std::cout << "  --help                  Show this help\n" << std::endl;
                 std::cout << "TRAINING FEATURES:" << std::endl;
@@ -5929,27 +5959,44 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
+        // Load training text from file if specified
+        if (!trainFile.empty()) {
+            std::ifstream file(trainFile);
+            if (!file.is_open()) {
+                std::cerr << "Error: Cannot open training file: " << trainFile << std::endl;
+                return 1;
+            }
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            trainText = buffer.str();
+            file.close();
+            std::cout << "[Training] Loaded " << trainText.size() << " characters from " << trainFile << std::endl;
+        }
+        
         std::cout << "\n=== Transformer Training ===" << std::endl;
         std::cout << "Model: " << modelPath << std::endl;
         std::cout << "Learning rate: " << trainCfg.learningRate << std::endl;
         std::cout << "Epochs: " << epochs << std::endl;
         std::cout << "Batch size: " << trainCfg.batchSize << std::endl;
         std::cout << "Gradient clip: " << trainCfg.gradientClipNorm << std::endl;
+        if (!trainFile.empty()) {
+            std::cout << "Training file: " << trainFile << std::endl;
+        }
         std::cout << "============================\n" << std::endl;
         
-        GGUFLoader model;
+        DistTransformer::GGUFLoader model;
         if (!model.loadFromFile(modelPath)) {
             std::cerr << "Failed to load model: " << modelPath << std::endl;
             return 1;
         }
         
-        ChatTokenizer tokenizer;
+        DistTransformer::ChatTokenizer tokenizer;
         if (!tokenizer.loadFromGGUF(model.getTokens(), model.getArchitecture())) {
             std::cerr << "Failed to load tokenizer from model" << std::endl;
             return 1;
         }
         
-        GPUTrainer trainer;
+        DistTransformer::GPUTrainer trainer;
         if (!trainer.initialize(&model, &tokenizer, trainCfg)) {
             std::cerr << "Failed to initialize trainer" << std::endl;
             return 1;
@@ -5960,6 +6007,8 @@ int main(int argc, char* argv[]) {
         if (trainText.empty()) {
             trainText = "The quick brown fox jumps over the lazy dog.";
             std::cout << "[Training] Using default training text: \"" << trainText << "\"" << std::endl;
+        } else if (trainFile.empty()) {
+            std::cout << "[Training] Using provided text: \"" << trainText.substr(0, 50) << (trainText.length() > 50 ? "..." : "") << "\"" << std::endl;
         }
         
         std::vector<int> inputTokens = tokenizer.encode(trainText);

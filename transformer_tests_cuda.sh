@@ -3014,6 +3014,197 @@ else
 fi
 
 # ============================================================================
+# PART 24B: TRAINING AND BACKPROPAGATION TESTS (20+ tests)
+# ============================================================================
+
+log_section "PART 24B: TRAINING AND BACKPROPAGATION TESTS"
+
+log_subsection "TrainingConfig and GPUTrainer Classes"
+
+test_case "TrainingConfig struct defined in transformer.cu"
+if grep -q "struct TrainingConfig" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "TrainingConfig struct missing"
+fi
+
+test_case "GPUTrainer class defined in transformer.cu"
+if grep -q "class GPUTrainer" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "GPUTrainer class missing"
+fi
+
+test_case "TrainingConfig learningRate field"
+if grep -q "learningRate" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "learningRate field missing"
+fi
+
+test_case "TrainingConfig batchSize field"
+if grep -q "batchSize" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "batchSize field missing"
+fi
+
+test_case "TrainingConfig gradientClipNorm field"
+if grep -q "gradientClipNorm" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "gradientClipNorm field missing"
+fi
+
+log_subsection "Adam Optimizer Implementation"
+
+test_case "Adam beta1 parameter"
+if grep -q "beta1" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "beta1 parameter missing"
+fi
+
+test_case "Adam beta2 parameter"
+if grep -q "beta2" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "beta2 parameter missing"
+fi
+
+test_case "Adam epsilon parameter"
+if grep -q "adamEps\|adam_eps\|epsilon" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "Adam epsilon missing"
+fi
+
+test_case "Adam optimizer step function"
+if grep -q "optimizerStep\|adam.*update\|applyAdam" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "Adam optimizer step missing"
+fi
+
+log_subsection "Backward Pass Kernels"
+
+test_case "CrossEntropyBackward kernel"
+if grep -q "crossEntropyBackward\|CrossEntropyBackward" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "CrossEntropyBackward kernel missing"
+fi
+
+test_case "RMSNorm backward computation"
+if grep -q "rmsNormBackward\|RMSNormBackward\|rmsnorm.*backward" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "RMSNorm backward missing"
+fi
+
+test_case "MatMul backward for weights"
+if grep -q "matmul.*backward\|vecMatMulBackward\|BackwardWeight" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "MatMul backward missing"
+fi
+
+test_case "Residual backward computation"
+if grep -q "residualBackward\|ResidualBackward" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "Residual backward missing"
+fi
+
+log_subsection "Training Mode CLI"
+
+test_case "Train command in main"
+if grep -q '"train"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "train command missing"
+fi
+
+test_case "--train-text argument"
+if grep -q '"--train-text"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--train-text argument missing"
+fi
+
+test_case "--train-file argument"
+if grep -q '"--train-file"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--train-file argument missing"
+fi
+
+test_case "--lr learning rate argument"
+if grep -q '"--lr"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--lr argument missing"
+fi
+
+test_case "--epochs argument"
+if grep -q '"--epochs"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--epochs argument missing"
+fi
+
+test_case "--batch-size argument"
+if grep -q '"--batch-size"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--batch-size argument missing"
+fi
+
+test_case "--grad-clip argument"
+if grep -q '"--grad-clip"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--grad-clip argument missing"
+fi
+
+log_subsection "Training Infrastructure"
+
+test_case "trainStep function"
+if grep -q "trainStep" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "trainStep function missing"
+fi
+
+test_case "getGradientNorm function"
+if grep -q "getGradientNorm\|gradientNorm" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "getGradientNorm function missing"
+fi
+
+test_case "clipGradients function"
+if grep -q "clipGradients" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "clipGradients function missing"
+fi
+
+test_case "Activation caching for backprop"
+if grep -q "activationCache\|ForwardCache\|cacheActivations" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "Activation caching missing"
+fi
+
+test_case "Loss computation"
+if grep -q "computeLoss\|crossEntropyLoss\|calculateLoss" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "Loss computation missing"
+fi
+
+# ============================================================================
 # SUMMARY AND REPORTING
 # ============================================================================
 
@@ -3818,6 +4009,320 @@ if grep -q "mat\[.*\*.*K.*\+\|n \* K \+ k" $TRANSFORMER_SRC; then
     pass
 else
     fail "Row-major indexing not verified"
+fi
+
+# ============================================================================
+# PART 27: TRAINING INFRASTRUCTURE TESTS
+# ============================================================================
+
+log_section "PART 27: TRAINING INFRASTRUCTURE TESTS"
+
+log_subsection "Training Kernels"
+
+test_case "Backward pass kernels defined in transformer.cu"
+if grep -q "BACKWARD PASS KERNELS\|backward.*kernel" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "Backward pass kernels missing"
+fi
+
+test_case "Backward pass kernels defined in facaded_transformer.cu"
+if grep -q "BACKWARD PASS KERNELS\|backward.*kernel" $FACADE_SRC; then
+    pass
+else
+    fail "Backward pass kernels missing in facade"
+fi
+
+test_case "Cross-entropy loss backward kernel"
+if grep -q "crossEntropyLossBackward\|cross.*entropy.*backward" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Cross-entropy backward kernel missing"
+fi
+
+test_case "Softmax backward kernel"
+if grep -q "softmaxBackward\|softmax.*backward" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Softmax backward kernel missing"
+fi
+
+test_case "Linear layer backward kernel"
+if grep -q "linearBackward\|linear.*backward\|matmul.*backward" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Linear backward kernel missing"
+fi
+
+test_case "RMSNorm backward kernel"
+if grep -q "rmsNormBackward\|rmsnorm.*backward\|RMSNorm.*backward" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "RMSNorm backward kernel missing"
+fi
+
+test_case "Attention backward kernel"
+if grep -q "attentionBackward\|attention.*backward" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Attention backward kernel missing"
+fi
+
+test_case "SiLU/SwiGLU backward kernel"
+if grep -q "siluBackward\|swiglu.*backward\|SiLU.*backward" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "SiLU backward kernel missing"
+fi
+
+test_case "RoPE backward kernel"
+if grep -q "ropeBackward\|rope.*backward\|RoPE.*backward" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "RoPE backward kernel missing"
+fi
+
+log_subsection "Training Configuration"
+
+test_case "TrainingConfig struct in transformer.cu"
+if grep -q "struct TrainingConfig" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "TrainingConfig struct missing"
+fi
+
+test_case "TrainingConfig struct in facaded_transformer.cu"
+if grep -q "struct TrainingConfig" $FACADE_SRC; then
+    pass
+else
+    fail "TrainingConfig struct missing in facade"
+fi
+
+test_case "Learning rate parameter"
+if grep -q "learningRate\|learning_rate" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Learning rate parameter missing"
+fi
+
+test_case "Batch size parameter"
+if grep -q "batchSize\|batch_size" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Batch size parameter missing"
+fi
+
+test_case "Gradient clipping norm parameter"
+if grep -q "gradientClipNorm\|gradient.*clip\|grad.*clip" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Gradient clipping parameter missing"
+fi
+
+test_case "Adam optimizer beta1 parameter"
+if grep -q "beta1\|adamBeta1" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Adam beta1 parameter missing"
+fi
+
+test_case "Adam optimizer beta2 parameter"
+if grep -q "beta2\|adamBeta2" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Adam beta2 parameter missing"
+fi
+
+test_case "Weight decay parameter"
+if grep -q "weightDecay\|weight_decay" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Weight decay parameter missing"
+fi
+
+log_subsection "GPUTrainer Class"
+
+test_case "GPUTrainer class in transformer.cu"
+if grep -q "class GPUTrainer" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "GPUTrainer class missing"
+fi
+
+test_case "GPUTrainer class in facaded_transformer.cu"
+if grep -q "class GPUTrainer" $FACADE_SRC; then
+    pass
+else
+    fail "GPUTrainer class missing in facade"
+fi
+
+test_case "GPUTrainer initialize method"
+if grep -q "GPUTrainer.*initialize\|trainer.*initialize" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "GPUTrainer initialize missing"
+fi
+
+test_case "GPUTrainer trainStep method"
+if grep -q "trainStep\|train_step" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "trainStep method missing"
+fi
+
+test_case "GPUTrainer clipGradients method"
+if grep -q "clipGradients\|clip_gradients" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "clipGradients method missing"
+fi
+
+test_case "GPUTrainer getGradientNorm method"
+if grep -q "getGradientNorm\|get_gradient_norm\|gradientNorm" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "getGradientNorm method missing"
+fi
+
+test_case "GPUTrainer getTotalParams method"
+if grep -q "getTotalParams\|get_total_params\|totalParams" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "getTotalParams method missing"
+fi
+
+log_subsection "Training CLI"
+
+test_case "train command in transformer.cu"
+if grep -q 'command == "train"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "train command missing in transformer.cu"
+fi
+
+test_case "train command in facaded_transformer.cu"
+if grep -q 'command == "train"' $FACADE_SRC; then
+    pass
+else
+    fail "train command missing in facaded_transformer.cu"
+fi
+
+test_case "--lr CLI argument"
+if grep -q '"--lr"' $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--lr argument missing"
+fi
+
+test_case "--epochs CLI argument"
+if grep -q '"--epochs"' $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--epochs argument missing"
+fi
+
+test_case "--batch-size CLI argument"
+if grep -q '"--batch-size"' $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--batch-size argument missing"
+fi
+
+test_case "--grad-clip CLI argument"
+if grep -q '"--grad-clip"' $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--grad-clip argument missing"
+fi
+
+test_case "--train-text CLI argument"
+if grep -q '"--train-text"' $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--train-text argument missing"
+fi
+
+test_case "--verbose training flag"
+if grep -q '"--verbose"' $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--verbose flag missing"
+fi
+
+log_subsection "Training Help Output"
+
+test_case "transformer.cu train help message"
+if grep -q "TRAIN MODE\|Fine-tune transformer" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "train help message missing"
+fi
+
+test_case "facaded_transformer.cu train help message"
+if grep -q "TRAIN MODE\|Fine-tune transformer" $FACADE_SRC; then
+    pass
+else
+    fail "train help message missing in facade"
+fi
+
+test_case "Training features help (backpropagation)"
+if grep -q "backpropagation\|Backpropagation" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "backpropagation help missing"
+fi
+
+test_case "Training features help (Adam optimizer)"
+if grep -q "Adam optimizer\|adam optimizer" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Adam optimizer help missing"
+fi
+
+test_case "Training features help (gradient clipping)"
+if grep -q "Gradient clipping\|gradient clipping" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "gradient clipping help missing"
+fi
+
+log_subsection "Activation Caching for Backprop"
+
+test_case "Activation caching structure"
+if grep -q "activationCache\|activation_cache\|ActivationCache\|cached.*activation" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Activation caching structure missing"
+fi
+
+test_case "Gradient storage buffers"
+if grep -q "gradients\|d_grad\|gradient.*buffer\|grad_" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Gradient storage buffers missing"
+fi
+
+test_case "Adam optimizer moment buffers (m and v)"
+if grep -q "adamM\|adam_m\|firstMoment\|m_\[" $TRANSFORMER_SRC $FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Adam moment buffers missing"
+fi
+
+log_subsection "Training CLI Help Documentation"
+
+test_case "train command in printMainHelp (transformer.cu)"
+if grep -q "train.*Fine-tune\|train.*backpropagation" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "train help in printMainHelp missing"
+fi
+
+test_case "train command in printMainHelp (facaded_transformer.cu)"
+if grep -q "train.*Fine-tune\|train.*backpropagation" $FACADE_SRC; then
+    pass
+else
+    fail "train help in printMainHelp missing in facade"
 fi
 
 # ============================================================================

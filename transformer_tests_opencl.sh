@@ -2988,6 +2988,197 @@ else
 fi
 
 # ============================================================================
+# PART 24B: TRAINING AND BACKPROPAGATION TESTS (20+ tests)
+# ============================================================================
+
+log_section "PART 24B: TRAINING AND BACKPROPAGATION TESTS"
+
+log_subsection "TrainingConfig and OpenCL Training Classes"
+
+test_case "TrainingConfig struct defined in transformer-opencl.cpp"
+if grep -q "struct TrainingConfig" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "TrainingConfig struct missing"
+fi
+
+test_case "TrainingConfig learningRate field"
+if grep -q "learningRate\|learning_rate" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "learningRate field missing"
+fi
+
+test_case "TrainingConfig batchSize field"
+if grep -q "batchSize\|batch_size" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "batchSize field missing"
+fi
+
+test_case "TrainingConfig gradientClipNorm field"
+if grep -q "gradientClipNorm\|gradient_clip" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "gradientClipNorm field missing"
+fi
+
+log_subsection "Adam Optimizer Implementation"
+
+test_case "Adam beta1 parameter"
+if grep -q "beta1" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "beta1 parameter missing"
+fi
+
+test_case "Adam beta2 parameter"
+if grep -q "beta2" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "beta2 parameter missing"
+fi
+
+test_case "Adam epsilon parameter"
+if grep -q "adamEps\|adam_eps\|epsilon" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "Adam epsilon missing"
+fi
+
+log_subsection "OpenCL Backward Pass Kernels"
+
+test_case "crossEntropyBackward OpenCL kernel"
+if grep -q "crossEntropyBackward" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "crossEntropyBackward kernel missing"
+fi
+
+test_case "rmsNormBackward OpenCL kernel"
+if grep -q "rmsNormBackward" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "rmsNormBackward kernel missing"
+fi
+
+test_case "vecMatMulBackwardInput OpenCL kernel"
+if grep -q "vecMatMulBackwardInput" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "vecMatMulBackwardInput kernel missing"
+fi
+
+test_case "vecMatMulBackwardWeight OpenCL kernel"
+if grep -q "vecMatMulBackwardWeight" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "vecMatMulBackwardWeight kernel missing"
+fi
+
+test_case "ropeBackward OpenCL kernel"
+if grep -q "ropeBackward" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "ropeBackward kernel missing"
+fi
+
+test_case "swiGLUBackward OpenCL kernel"
+if grep -q "swiGLUBackward" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "swiGLUBackward kernel missing"
+fi
+
+test_case "residualBackward OpenCL kernel"
+if grep -q "residualBackward" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "residualBackward kernel missing"
+fi
+
+log_subsection "Training Mode CLI"
+
+test_case "Train command in main"
+if grep -q '"train"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "train command missing"
+fi
+
+test_case "--train-text argument"
+if grep -q '"--train-text"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--train-text argument missing"
+fi
+
+test_case "--train-file argument"
+if grep -q '"--train-file"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--train-file argument missing"
+fi
+
+test_case "--lr learning rate argument"
+if grep -q '"--lr"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--lr argument missing"
+fi
+
+test_case "--epochs argument"
+if grep -q '"--epochs"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--epochs argument missing"
+fi
+
+test_case "--batch-size argument"
+if grep -q '"--batch-size"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--batch-size argument missing"
+fi
+
+test_case "--grad-clip argument"
+if grep -q '"--grad-clip"' $TRANSFORMER_SRC; then
+    pass
+else
+    fail "--grad-clip argument missing"
+fi
+
+log_subsection "Training Infrastructure"
+
+test_case "trainStep function"
+if grep -q "trainStep" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "trainStep function missing"
+fi
+
+test_case "Gradient norm computation"
+if grep -q "getGradientNorm\|gradientNorm\|grad_norm" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "Gradient norm function missing"
+fi
+
+test_case "Gradient clipping function"
+if grep -q "clipGradients\|clip_gradients" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "clipGradients function missing"
+fi
+
+test_case "Loss computation"
+if grep -q "computeLoss\|crossEntropyLoss\|calculateLoss" $TRANSFORMER_SRC; then
+    pass
+else
+    fail "Loss computation missing"
+fi
+
+# ============================================================================
 # SUMMARY AND REPORTING
 # ============================================================================
 
@@ -3823,6 +4014,310 @@ if [ -f "$MODEL_DIR/Llama-3.2-3B-Instruct-Q4_K_M.gguf" ]; then
     fi
 else
     fail "Model file not found"
+fi
+
+# ============================================================================
+# PART 27: TRAINING INFRASTRUCTURE TESTS (OpenCL)
+# ============================================================================
+
+log_section "PART 27: TRAINING INFRASTRUCTURE TESTS (OpenCL)"
+
+# Use actual source file names (with hyphens)
+OPENCL_SRC="transformer-opencl.cpp"
+OPENCL_FACADE_SRC="facaded-transformer-opencl.cpp"
+
+log_subsection "Training Kernels"
+
+test_case "Backward pass kernels defined in transformer-opencl.cpp"
+if grep -q "BACKWARD PASS KERNELS\|backward.*kernel" $OPENCL_SRC 2>/dev/null; then
+    pass
+else
+    fail "Backward pass kernels missing"
+fi
+
+test_case "Backward pass kernels defined in facaded-transformer-opencl.cpp"
+if grep -q "BACKWARD PASS KERNELS\|backward.*kernel" $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Backward pass kernels missing in facade"
+fi
+
+test_case "Cross-entropy loss backward kernel (OpenCL)"
+if grep -q "crossEntropyLossBackward\|cross.*entropy.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Cross-entropy backward kernel missing"
+fi
+
+test_case "Softmax backward kernel (OpenCL)"
+if grep -q "softmaxBackward\|softmax.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Softmax backward kernel missing"
+fi
+
+test_case "Linear layer backward kernel (OpenCL)"
+if grep -q "linearBackward\|linear.*backward\|matmul.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Linear backward kernel missing"
+fi
+
+test_case "RMSNorm backward kernel (OpenCL)"
+if grep -q "rmsNormBackward\|rmsnorm.*backward\|RMSNorm.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "RMSNorm backward kernel missing"
+fi
+
+test_case "Attention backward kernel (OpenCL)"
+if grep -q "attentionBackward\|attention.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Attention backward kernel missing"
+fi
+
+test_case "SiLU/SwiGLU backward kernel (OpenCL)"
+if grep -q "siluBackward\|swiglu.*backward\|SiLU.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "SiLU backward kernel missing"
+fi
+
+test_case "RoPE backward kernel (OpenCL)"
+if grep -q "ropeBackward\|rope.*backward\|RoPE.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "RoPE backward kernel missing"
+fi
+
+log_subsection "Training Configuration"
+
+test_case "TrainingConfig struct in transformer-opencl.cpp"
+if grep -q "struct TrainingConfig" $OPENCL_SRC 2>/dev/null; then
+    pass
+else
+    fail "TrainingConfig struct missing"
+fi
+
+test_case "TrainingConfig struct in facaded-transformer-opencl.cpp"
+if grep -q "struct TrainingConfig" $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "TrainingConfig struct missing in facade"
+fi
+
+test_case "Learning rate parameter (OpenCL)"
+if grep -q "learningRate\|learning_rate" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Learning rate parameter missing"
+fi
+
+test_case "Batch size parameter (OpenCL)"
+if grep -q "batchSize\|batch_size" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Batch size parameter missing"
+fi
+
+test_case "Gradient clipping norm parameter (OpenCL)"
+if grep -q "gradientClipNorm\|gradient.*clip\|grad.*clip" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Gradient clipping parameter missing"
+fi
+
+test_case "Adam optimizer beta1 parameter (OpenCL)"
+if grep -q "beta1\|adamBeta1" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Adam beta1 parameter missing"
+fi
+
+test_case "Adam optimizer beta2 parameter (OpenCL)"
+if grep -q "beta2\|adamBeta2" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Adam beta2 parameter missing"
+fi
+
+test_case "Weight decay parameter (OpenCL)"
+if grep -q "weightDecay\|weight_decay" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Weight decay parameter missing"
+fi
+
+log_subsection "OpenCLTrainer Class"
+
+test_case "OpenCLTrainer class in transformer-opencl.cpp"
+if grep -q "class OpenCLTrainer" $OPENCL_SRC 2>/dev/null; then
+    pass
+else
+    fail "OpenCLTrainer class missing"
+fi
+
+test_case "OpenCLTrainer class in facaded-transformer-opencl.cpp"
+if grep -q "class OpenCLTrainer" $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "OpenCLTrainer class missing in facade"
+fi
+
+test_case "OpenCLTrainer initialize method"
+if grep -q "OpenCLTrainer.*initialize\|trainer.*initialize" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "OpenCLTrainer initialize missing"
+fi
+
+test_case "OpenCLTrainer trainStep method"
+if grep -q "trainStep\|train_step" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "trainStep method missing"
+fi
+
+test_case "OpenCLTrainer clipGradients method"
+if grep -q "clipGradients\|clip_gradients" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "clipGradients method missing"
+fi
+
+log_subsection "Training CLI (OpenCL)"
+
+test_case "train command in transformer-opencl.cpp"
+if grep -q 'command == "train"' $OPENCL_SRC 2>/dev/null; then
+    pass
+else
+    fail "train command missing in transformer-opencl.cpp"
+fi
+
+test_case "train command in facaded-transformer-opencl.cpp"
+if grep -q 'command == "train"' $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "train command missing in facaded-transformer-opencl.cpp"
+fi
+
+test_case "--lr CLI argument (OpenCL)"
+if grep -q '"--lr"' $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--lr argument missing"
+fi
+
+test_case "--epochs CLI argument (OpenCL)"
+if grep -q '"--epochs"' $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--epochs argument missing"
+fi
+
+test_case "--batch-size CLI argument (OpenCL)"
+if grep -q '"--batch-size"' $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--batch-size argument missing"
+fi
+
+test_case "--grad-clip CLI argument (OpenCL)"
+if grep -q '"--grad-clip"' $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--grad-clip argument missing"
+fi
+
+test_case "--train-text CLI argument (OpenCL)"
+if grep -q '"--train-text"' $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--train-text argument missing"
+fi
+
+test_case "--verbose training flag (OpenCL)"
+if grep -q '"--verbose"' $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "--verbose flag missing"
+fi
+
+log_subsection "Training Help Output (OpenCL)"
+
+test_case "transformer-opencl.cpp train help message"
+if grep -q "TRAIN MODE\|Fine-tune transformer" $OPENCL_SRC 2>/dev/null; then
+    pass
+else
+    fail "train help message missing"
+fi
+
+test_case "facaded-transformer-opencl.cpp train help message"
+if grep -q "TRAIN MODE\|Fine-tune transformer" $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "train help message missing in facade"
+fi
+
+test_case "Training features help (backpropagation) - OpenCL"
+if grep -q "backpropagation\|Backpropagation" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "backpropagation help missing"
+fi
+
+test_case "Training features help (Adam optimizer) - OpenCL"
+if grep -q "Adam optimizer\|adam optimizer" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Adam optimizer help missing"
+fi
+
+test_case "Training features help (gradient clipping) - OpenCL"
+if grep -q "Gradient clipping\|gradient clipping" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "gradient clipping help missing"
+fi
+
+log_subsection "Activation Caching for Backprop (OpenCL)"
+
+test_case "Activation caching structure (OpenCL)"
+if grep -q "activationCache\|activation_cache\|ActivationCache\|cached.*activation" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Activation caching structure missing"
+fi
+
+test_case "Gradient storage buffers (OpenCL)"
+if grep -q "gradients\|d_grad\|gradient.*buffer\|grad_" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Gradient storage buffers missing"
+fi
+
+test_case "Adam optimizer moment buffers (m and v) - OpenCL"
+if grep -q "adamM\|adam_m\|firstMoment\|m_\[" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "Adam moment buffers missing"
+fi
+
+log_subsection "Training CLI Help Documentation (OpenCL)"
+
+test_case "train command in printMainHelp (transformer-opencl.cpp)"
+if grep -q "train.*Fine-tune\|train.*backpropagation" $OPENCL_SRC 2>/dev/null; then
+    pass
+else
+    fail "train help in printMainHelp missing"
+fi
+
+test_case "train command in printMainHelp (facaded-transformer-opencl.cpp)"
+if grep -q "train.*Fine-tune\|train.*backpropagation" $OPENCL_FACADE_SRC 2>/dev/null; then
+    pass
+else
+    fail "train help in printMainHelp missing in facade"
 fi
 
 # ============================================================================

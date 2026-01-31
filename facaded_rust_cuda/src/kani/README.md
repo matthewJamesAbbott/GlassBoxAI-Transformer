@@ -2,7 +2,7 @@
 
 ## CISA Secure-by-Design Hardening Proofs
 
-This directory contains **99 formal verification harnesses** using the [Kani Rust Verifier](https://model-checking.github.io/kani/) to prove security properties required for CISA compliance.
+This directory contains **124 formal verification harnesses** using the [Kani Rust Verifier](https://model-checking.github.io/kani/) to prove security properties required for CISA compliance.
 
 **Verification Status**: All harnesses pass verification successfully.
 
@@ -142,6 +142,23 @@ Key proofs:
 - `verify_layer_access_bounds` - Layer indexing safety
 - `verify_attention_head_bounds` - GQA head mapping
 - `verify_cache_size_calculation` - KV cache sizing
+
+### `trainer.rs`
+Verifies training infrastructure safety including backpropagation, Adam optimizer, gradient clipping, and activation caching.
+
+Key proofs:
+- `verify_learning_rate_bounds` - Training hyperparameter validation
+- `verify_adam_beta_bounds` - Adam optimizer β1/β2 constraints
+- `verify_gradient_clip_scaling` - Gradient clipping scale factor
+- `verify_adam_weight_update_no_div_zero` - Division-by-zero prevention with ε
+- `verify_adam_epsilon_safety` - Adam ε prevents zero denominator
+- `verify_cross_entropy_log_safe` - Log computation with clamping
+- `verify_softmax_denom_positive` - Softmax denominator safety
+- `verify_activation_cache_layer_bounds` - Cache indexing bounds
+- `verify_silu_backward_safe` - SiLU activation backward pass
+- `verify_attention_weight_dims` - Weight dimension calculations
+- `verify_ffn_weight_dims` - FFN weight size safety
+- `verify_total_params_calculation` - Parameter count overflow prevention
 
 ## Security Budget Constants
 

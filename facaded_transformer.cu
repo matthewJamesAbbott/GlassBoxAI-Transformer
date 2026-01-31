@@ -890,13 +890,20 @@ static bool sendRawFrame(int s, const uint8_t* destMAC, const uint8_t* srcMAC,
         std::cerr << "sendRawFrame: socket is invalid" << std::endl;
         return false;
     }
+    
+    if (!destMAC || !srcMAC) {
+        std::cerr << "sendRawFrame: invalid MAC addresses" << std::endl;
+        return false;
+    }
 
-    std::vector<uint8_t> frame(14 + payload.size());
-    memcpy(&frame[0], destMAC, 6);
-    memcpy(&frame[6], srcMAC, 6);
+    std::vector<uint8_t> frame;
+    frame.reserve(14 + payload.size());
+    frame.insert(frame.end(), destMAC, destMAC + 6);
+    frame.insert(frame.end(), srcMAC, srcMAC + 6);
     uint16_t etherType = htons(DTX_ETHERTYPE);
-    memcpy(&frame[12], &etherType, 2);
-    memcpy(&frame[14], payload.data(), payload.size());
+    frame.push_back(static_cast<uint8_t>(etherType >> 8));
+    frame.push_back(static_cast<uint8_t>(etherType & 0xFF));
+    frame.insert(frame.end(), payload.begin(), payload.end());
 
     struct sockaddr_ll addr;
     memset(&addr, 0, sizeof(addr));
@@ -5940,6 +5947,7 @@ void printMainHelp(const char* progName) {
     std::cout << "    --batch-size <n>        Batch size (default: 1)" << std::endl;
     std::cout << "    --grad-clip <n>         Gradient clipping norm (default: 1.0)" << std::endl;
     std::cout << "    --train-text <text>     Training text for fine-tuning" << std::endl;
+    std::cout << "    --train-file <path>     Load training text from file" << std::endl;
     std::cout << "    --verbose               Show training progress" << std::endl;
     std::cout << "    --help                  Show train help\n" << std::endl;
 
@@ -7237,6 +7245,7 @@ int main(int argc, char* argv[]) {
     } else if (command == "train") {
         std::string modelPath;
         std::string trainText;
+        std::string trainFile;
         TrainingConfig trainCfg;
         int epochs = 1;
         bool verbose = false;
@@ -7255,6 +7264,8 @@ int main(int argc, char* argv[]) {
                 trainCfg.gradientClipNorm = std::stof(argv[++i]);
             } else if (arg == "--train-text" && i + 1 < argc) {
                 trainText = argv[++i];
+            } else if (arg == "--train-file" && i + 1 < argc) {
+                trainFile = argv[++i];
             } else if (arg == "--verbose") {
                 verbose = true;
             } else if (arg == "--help") {
@@ -7267,6 +7278,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --batch-size <n>        Batch size (default: 1)" << std::endl;
                 std::cout << "  --grad-clip <n>         Gradient clipping norm (default: 1.0)" << std::endl;
                 std::cout << "  --train-text <text>     Training text for fine-tuning" << std::endl;
+                std::cout << "  --train-file <path>     Load training text from file (whitespace-delimited)" << std::endl;
                 std::cout << "  --verbose               Show training progress" << std::endl;
                 std::cout << "  --help                  Show this help\n" << std::endl;
                 std::cout << "TRAINING FEATURES:" << std::endl;
@@ -7285,12 +7297,29 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
+        // Load training text from file if specified
+        if (!trainFile.empty()) {
+            std::ifstream file(trainFile);
+            if (!file.is_open()) {
+                std::cerr << "Error: Cannot open training file: " << trainFile << std::endl;
+                return 1;
+            }
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            trainText = buffer.str();
+            file.close();
+            std::cout << "[Training] Loaded " << trainText.size() << " characters from " << trainFile << std::endl;
+        }
+        
         std::cout << "\n=== Transformer Training ===" << std::endl;
         std::cout << "Model: " << modelPath << std::endl;
         std::cout << "Learning rate: " << trainCfg.learningRate << std::endl;
         std::cout << "Epochs: " << epochs << std::endl;
         std::cout << "Batch size: " << trainCfg.batchSize << std::endl;
         std::cout << "Gradient clip: " << trainCfg.gradientClipNorm << std::endl;
+        if (!trainFile.empty()) {
+            std::cout << "Training file: " << trainFile << std::endl;
+        }
         std::cout << "============================\n" << std::endl;
         
         GGUFLoader model;
@@ -7316,6 +7345,8 @@ int main(int argc, char* argv[]) {
         if (trainText.empty()) {
             trainText = "The quick brown fox jumps over the lazy dog.";
             std::cout << "[Training] Using default training text: \"" << trainText << "\"" << std::endl;
+        } else if (trainFile.empty()) {
+            std::cout << "[Training] Using provided text: \"" << trainText.substr(0, 50) << (trainText.length() > 50 ? "..." : "") << "\"" << std::endl;
         }
         
         std::vector<int> inputTokens = tokenizer.encode(trainText);

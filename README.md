@@ -11,7 +11,7 @@
 [![OpenCL](https://img.shields.io/badge/OpenCL-3.0-blue.svg)](https://www.khronos.org/opencl/)
 [![Metal](https://img.shields.io/badge/Metal-macOS-silver.svg)](https://developer.apple.com/metal/)
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange.svg)](https://www.rust-lang.org/)
-[![Kani](https://img.shields.io/badge/Kani-99%20Proofs-brightgreen.svg)](https://model-checking.github.io/kani/)
+[![Kani](https://img.shields.io/badge/Kani-124%20Proofs-brightgreen.svg)](https://model-checking.github.io/kani/)
 [![CISA Compliant](https://img.shields.io/badge/CISA-Secure%20by%20Design-blue.svg)](https://www.cisa.gov/securebydesign)
 
 ---
@@ -25,7 +25,7 @@ GlassBoxAI-Transformer is a comprehensive, production-ready Large Language Model
 - **GGUF model format support**: Load quantized models from llama.cpp ecosystem
 - **Quantization support**: Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0 formats with GPU-accelerated dequantization
 - **Facade pattern architecture**: Clean API separation with deep introspection capabilities
-- **Formal verification**: 99 Kani-verified proof harnesses for memory safety guarantees
+- **Formal verification**: 124 Kani-verified proof harnesses for memory safety guarantees
 - **CISA/NSA Secure by Design compliance**: Built following government cybersecurity standards
 
 This project demonstrates enterprise-grade software engineering practices including comprehensive testing, formal verification, cross-platform compatibility, and security-first development.
@@ -125,7 +125,7 @@ GlassBoxAI-Transformer supports GGUF models from the llama.cpp ecosystem. Compat
 | Feature | Technology |
 |---------|------------|
 | **Memory Safety** | Rust ownership model |
-| **Formal Verification** | 99 Kani proof harnesses |
+| **Formal Verification** | 124 Kani proof harnesses |
 | **Bounds Checking** | Verified array access |
 | **Input Validation** | CLI argument validation |
 | **CISA Compliance** | 12 of 15 requirements verified |
@@ -898,6 +898,7 @@ For systems with limited GPU memory, GlassBoxAI-Transformer supports mixed devic
 | `--batch-size <n>` | Batch size (default: 1) |
 | `--grad-clip <n>` | Gradient clipping norm (default: 1.0) |
 | `--train-text <text>` | Training text for fine-tuning |
+| `--train-file <path>` | Load training text from file (whitespace-delimited) |
 | `--verbose` | Show detailed training progress |
 | `--help` | Show training help |
 
@@ -914,17 +915,20 @@ For systems with limited GPU memory, GlassBoxAI-Transformer supports mixed devic
 ### Example Usage
 
 ```bash
-# Basic training
+# Basic training with inline text
 ./facaded-transformer-cuda train -m models/llama.gguf --train-text "Hello world"
+
+# Training from a text file
+./facaded-transformer-cuda train -m models/llama.gguf --train-file corpus.txt --epochs 10
 
 # Training with custom parameters
 ./facaded-transformer-cuda train -m models/llama.gguf \
     --lr 0.0001 --epochs 10 --batch-size 4 --grad-clip 1.0 \
     --train-text "The quick brown fox" --verbose
 
-# Fine-tuning with verbose output
+# Fine-tuning from file with verbose output
 ./facaded-transformer-cuda train -m models/tinyllama.gguf \
-    --epochs 100 --verbose --train-text "Custom training data here"
+    --epochs 100 --verbose --train-file training_data.txt
 ```
 
 ---
@@ -1030,7 +1034,8 @@ The test suite covers 12 of 15 CISA security verification requirements:
 | `tokenizer.rs` | 12 | Input sanitization |
 | `quant.rs` | 15 | Quantization arithmetic |
 | `model.rs` | 13 | Model loading safety |
-| **Total** | **99** | |
+| `trainer.rs` | 25 | Training infrastructure safety |
+| **Total** | **124** | |
 
 ### Key Kani Proofs
 
@@ -1088,7 +1093,7 @@ This project follows **CISA (Cybersecurity and Infrastructure Security Agency)**
 | Principle | Implementation |
 |-----------|---------------|
 | **Memory Safety** | Rust ownership model eliminates buffer overflows, use-after-free, and data races |
-| **Formal Verification** | 99 Kani proofs mathematically verify absence of critical bugs |
+| **Formal Verification** | 124 Kani proofs mathematically verify absence of critical bugs |
 | **Input Validation** | All CLI inputs validated before processing |
 | **Defense in Depth** | Multiple layers of safety (language, compiler, runtime checks) |
 | **Secure Defaults** | Safe default configurations throughout |
@@ -1098,7 +1103,7 @@ This project follows **CISA (Cybersecurity and Infrastructure Security Agency)**
 
 - [x] **Memory-safe language** (Rust implementation)
 - [x] **Static analysis** (Rust compiler + Clippy)
-- [x] **Formal verification** (99 Kani proof harnesses)
+- [x] **Formal verification** (124 Kani proof harnesses)
 - [x] **Comprehensive testing** (Unit tests + integration tests)
 - [x] **Bounds checking** (Verified array access)
 - [x] **Input validation** (CLI argument parsing)
