@@ -33,3 +33,6 @@ pub mod model;
 
 #[cfg(kani)]
 pub mod trainer;
+
+#[cfg(kani)]
+pub mod lora;

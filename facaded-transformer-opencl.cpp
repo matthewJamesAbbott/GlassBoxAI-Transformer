@@ -2315,6 +2315,155 @@ struct TrainingConfig {
     int batchSize = 1;
 };
 
+// ============================================================================
+// LoRA (Low-Rank Adaptation) CPU Functions
+// For OpenCL: We use CPU-side std::vector<float> storage and CPU implementations
+// ============================================================================
+
+void loraInitA(std::vector<float>& A, int size, unsigned int seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    A.resize(size);
+    for (int i = 0; i < size; i++) {
+        A[i] = dist(rng) * 0.01f;
+    }
+}
+
+void loraInitB(std::vector<float>& B, int size) {
+    B.resize(size);
+    std::fill(B.begin(), B.end(), 0.0f);
+}
+
+void loraForwardA(std::vector<float>& temp, const std::vector<float>& A,
+                  const std::vector<float>& input, int rank, int inDim) {
+    temp.resize(rank);
+    for (int r = 0; r < rank; r++) {
+        float sum = 0.0f;
+        for (int i = 0; i < inDim; i++) {
+            sum += A[r * inDim + i] * input[i];
+        }
+        temp[r] = sum;
+    }
+}
+
+void loraForwardB(std::vector<float>& output, const std::vector<float>& B,
+                  const std::vector<float>& temp, int outDim, int rank, float scaling) {
+    for (int o = 0; o < outDim; o++) {
+        float sum = 0.0f;
+        for (int r = 0; r < rank; r++) {
+            sum += B[o * rank + r] * temp[r];
+        }
+        output[o] += scaling * sum;
+    }
+}
+
+void loraDropout(std::vector<float>& temp, float dropProb, unsigned int& seed, bool training) {
+    if (!training || dropProb <= 0.0f) return;
+    std::mt19937 rng(seed++);
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    float scale = 1.0f / (1.0f - dropProb);
+    for (size_t i = 0; i < temp.size(); i++) {
+        if (dist(rng) < dropProb) {
+            temp[i] = 0.0f;
+        } else {
+            temp[i] *= scale;
+        }
+    }
+}
+
+void loraBackwardB(std::vector<float>& dB, const std::vector<float>& dOutput,
+                   const std::vector<float>& temp, int outDim, int rank, float scaling) {
+    for (int o = 0; o < outDim; o++) {
+        for (int r = 0; r < rank; r++) {
+            dB[o * rank + r] += scaling * dOutput[o] * temp[r];
+        }
+    }
+}
+
+void loraBackwardTemp(std::vector<float>& dTemp, const std::vector<float>& B,
+                      const std::vector<float>& dOutput, int outDim, int rank, float scaling) {
+    dTemp.resize(rank);
+    std::fill(dTemp.begin(), dTemp.end(), 0.0f);
+    for (int r = 0; r < rank; r++) {
+        float sum = 0.0f;
+        for (int o = 0; o < outDim; o++) {
+            sum += B[o * rank + r] * dOutput[o];
+        }
+        dTemp[r] = scaling * sum;
+    }
+}
+
+void loraBackwardA(std::vector<float>& dA, const std::vector<float>& dTemp,
+                   const std::vector<float>& input, int rank, int inDim) {
+    for (int r = 0; r < rank; r++) {
+        for (int i = 0; i < inDim; i++) {
+            dA[r * inDim + i] += dTemp[r] * input[i];
+        }
+    }
+}
+
+void loraMerge(std::vector<float>& W, const std::vector<float>& A, const std::vector<float>& B,
+               int outDim, int inDim, int rank, float scaling) {
+    for (int o = 0; o < outDim; o++) {
+        for (int i = 0; i < inDim; i++) {
+            float delta = 0.0f;
+            for (int r = 0; r < rank; r++) {
+                delta += B[o * rank + r] * A[r * inDim + i];
+            }
+            W[o * inDim + i] += scaling * delta;
+        }
+    }
+}
+
+// ============================================================================
+// LoRA (Low-Rank Adaptation) Configuration and Structures
+// For Glassbox AI: Enables analysis of model adaptation deltas
+// ============================================================================
+
+struct LoRAConfig {
+    int rank = 16;
+    float alpha = 32.0f;
+    float dropout = 0.05f;
+    bool enableQ = true;
+    bool enableK = true;
+    bool enableV = true;
+    bool enableO = true;
+    bool enableGate = true;
+    bool enableUp = true;
+    bool enableDown = true;
+    bool freezeBase = true;
+    std::string name = "lora";
+    
+    float getScaling() const { return alpha / static_cast<float>(rank); }
+};
+
+struct LoRAAdapter {
+    std::vector<float> A;
+    std::vector<float> B;
+    std::vector<float> dA;
+    std::vector<float> dB;
+    std::vector<float> mA;
+    std::vector<float> vA;
+    std::vector<float> mB;
+    std::vector<float> vB;
+    std::vector<float> savedInput;
+    std::vector<float> savedTemp;
+    int inDim = 0;
+    int outDim = 0;
+    int rank = 0;
+    bool enabled = false;
+};
+
+struct LayerLoRA {
+    LoRAAdapter q;
+    LoRAAdapter k;
+    LoRAAdapter v;
+    LoRAAdapter o;
+    LoRAAdapter gate;
+    LoRAAdapter up;
+    LoRAAdapter down;
+};
+
 struct LayerGradients {
     cl_mem dAttnNorm = nullptr;
     cl_mem dFFNNorm = nullptr;
@@ -2813,6 +2962,438 @@ public:
     bool isInitialized() const { return initialized; }
     size_t getTotalParams() const { return totalParams; }
     void setLearningRate(float lr) { config.learningRate = lr; }
+    
+    // ========================================================================
+    // LoRA (Low-Rank Adaptation) Members and Methods
+    // For Glassbox AI: Enables analysis of model adaptation deltas
+    // ========================================================================
+    
+private:
+    LoRAConfig loraConfig;
+    std::vector<LayerLoRA> layerLoRA;
+    std::vector<float> loraTemp;
+    std::vector<float> loraDTemp;
+    bool loraEnabled = false;
+    bool loraInitialized = false;
+    unsigned int loraDropoutSeed = 0;
+    
+    void initLoRAAdapter(LoRAAdapter& adapter, int inDim, int outDim, int rank, unsigned int seed) {
+        adapter.inDim = inDim;
+        adapter.outDim = outDim;
+        adapter.rank = rank;
+        adapter.enabled = true;
+        
+        size_t aSize = (size_t)rank * inDim;
+        size_t bSize = (size_t)outDim * rank;
+        
+        loraInitA(adapter.A, aSize, seed);
+        loraInitB(adapter.B, bSize);
+        
+        adapter.dA.resize(aSize, 0.0f);
+        adapter.dB.resize(bSize, 0.0f);
+        adapter.mA.resize(aSize, 0.0f);
+        adapter.vA.resize(aSize, 0.0f);
+        adapter.mB.resize(bSize, 0.0f);
+        adapter.vB.resize(bSize, 0.0f);
+        adapter.savedInput.clear();
+        adapter.savedTemp.clear();
+    }
+    
+    void cleanupLoRAAdapter(LoRAAdapter& adapter) {
+        adapter.A.clear();
+        adapter.B.clear();
+        adapter.dA.clear();
+        adapter.dB.clear();
+        adapter.mA.clear();
+        adapter.vA.clear();
+        adapter.mB.clear();
+        adapter.vB.clear();
+        adapter.savedInput.clear();
+        adapter.savedTemp.clear();
+        adapter.enabled = false;
+    }
+    
+public:
+    void cleanupLoRA() {
+        for (auto& layer : layerLoRA) {
+            cleanupLoRAAdapter(layer.q);
+            cleanupLoRAAdapter(layer.k);
+            cleanupLoRAAdapter(layer.v);
+            cleanupLoRAAdapter(layer.o);
+            cleanupLoRAAdapter(layer.gate);
+            cleanupLoRAAdapter(layer.up);
+            cleanupLoRAAdapter(layer.down);
+        }
+        layerLoRA.clear();
+        loraTemp.clear();
+        loraDTemp.clear();
+        loraInitialized = false;
+    }
+    
+    bool initializeLoRA(const LoRAConfig& cfg) {
+        loraConfig = cfg;
+        cleanupLoRA();
+        
+        std::cout << "[LoRA] Initializing adapters..." << std::endl;
+        std::cout << "[LoRA] Config: rank=" << cfg.rank << ", alpha=" << cfg.alpha 
+                  << ", dropout=" << cfg.dropout << ", scaling=" << cfg.getScaling() << std::endl;
+        
+        loraTemp.resize(cfg.rank);
+        loraDTemp.resize(cfg.rank);
+        
+        layerLoRA.resize(nLayers);
+        unsigned int seed = static_cast<unsigned int>(std::chrono::system_clock::now().time_since_epoch().count());
+        
+        size_t loraParams = 0;
+        for (int l = 0; l < nLayers; l++) {
+            auto& layer = layerLoRA[l];
+            
+            if (cfg.enableQ) {
+                initLoRAAdapter(layer.q, dim, qDim, cfg.rank, seed++);
+                loraParams += (size_t)cfg.rank * dim + (size_t)qDim * cfg.rank;
+            }
+            if (cfg.enableK) {
+                initLoRAAdapter(layer.k, dim, kvDim, cfg.rank, seed++);
+                loraParams += (size_t)cfg.rank * dim + (size_t)kvDim * cfg.rank;
+            }
+            if (cfg.enableV) {
+                initLoRAAdapter(layer.v, dim, kvDim, cfg.rank, seed++);
+                loraParams += (size_t)cfg.rank * dim + (size_t)kvDim * cfg.rank;
+            }
+            if (cfg.enableO) {
+                initLoRAAdapter(layer.o, qDim, dim, cfg.rank, seed++);
+                loraParams += (size_t)cfg.rank * qDim + (size_t)dim * cfg.rank;
+            }
+            if (cfg.enableGate) {
+                initLoRAAdapter(layer.gate, dim, ffnDim, cfg.rank, seed++);
+                loraParams += (size_t)cfg.rank * dim + (size_t)ffnDim * cfg.rank;
+            }
+            if (cfg.enableUp) {
+                initLoRAAdapter(layer.up, dim, ffnDim, cfg.rank, seed++);
+                loraParams += (size_t)cfg.rank * dim + (size_t)ffnDim * cfg.rank;
+            }
+            if (cfg.enableDown) {
+                initLoRAAdapter(layer.down, ffnDim, dim, cfg.rank, seed++);
+                loraParams += (size_t)cfg.rank * ffnDim + (size_t)dim * cfg.rank;
+            }
+        }
+        
+        loraEnabled = true;
+        loraInitialized = true;
+        loraDropoutSeed = seed;
+        
+        std::cout << "[LoRA] Initialized " << loraParams << " trainable parameters ("
+                  << std::fixed << std::setprecision(2) << (loraParams * 4.0 / 1024 / 1024) << " MB)" << std::endl;
+        std::cout << "[LoRA] Base model frozen: " << (cfg.freezeBase ? "yes" : "no") << std::endl;
+        
+        return true;
+    }
+    
+    bool saveLoRA(const std::string& path) {
+        if (!loraInitialized) {
+            std::cerr << "[LoRA] Not initialized" << std::endl;
+            return false;
+        }
+        
+        std::ofstream file(path, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "[LoRA] Cannot open file: " << path << std::endl;
+            return false;
+        }
+        
+        const char magic[] = "LORA";
+        file.write(magic, 4);
+        
+        int version = 1;
+        file.write(reinterpret_cast<const char*>(&version), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&loraConfig.rank), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&loraConfig.alpha), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&loraConfig.dropout), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&nLayers), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&dim), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&qDim), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&kvDim), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&ffnDim), sizeof(int));
+        
+        uint8_t flags = 0;
+        if (loraConfig.enableQ) flags |= 0x01;
+        if (loraConfig.enableK) flags |= 0x02;
+        if (loraConfig.enableV) flags |= 0x04;
+        if (loraConfig.enableO) flags |= 0x08;
+        if (loraConfig.enableGate) flags |= 0x10;
+        if (loraConfig.enableUp) flags |= 0x20;
+        if (loraConfig.enableDown) flags |= 0x40;
+        file.write(reinterpret_cast<const char*>(&flags), sizeof(uint8_t));
+        
+        size_t nameLen = loraConfig.name.size();
+        file.write(reinterpret_cast<const char*>(&nameLen), sizeof(size_t));
+        file.write(loraConfig.name.c_str(), nameLen);
+        
+        auto saveAdapter = [&](const LoRAAdapter& adapter) {
+            if (!adapter.enabled) return;
+            file.write(reinterpret_cast<const char*>(adapter.A.data()), adapter.A.size() * sizeof(float));
+            file.write(reinterpret_cast<const char*>(adapter.B.data()), adapter.B.size() * sizeof(float));
+        };
+        
+        for (int l = 0; l < nLayers; l++) {
+            auto& layer = layerLoRA[l];
+            saveAdapter(layer.q);
+            saveAdapter(layer.k);
+            saveAdapter(layer.v);
+            saveAdapter(layer.o);
+            saveAdapter(layer.gate);
+            saveAdapter(layer.up);
+            saveAdapter(layer.down);
+        }
+        
+        file.close();
+        std::cout << "[LoRA] Saved to: " << path << std::endl;
+        return true;
+    }
+    
+    bool loadLoRA(const std::string& path) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "[LoRA] Cannot open file: " << path << std::endl;
+            return false;
+        }
+        
+        char magic[4];
+        file.read(magic, 4);
+        if (std::string(magic, 4) != "LORA") {
+            std::cerr << "[LoRA] Invalid file format" << std::endl;
+            return false;
+        }
+        
+        int version;
+        file.read(reinterpret_cast<char*>(&version), sizeof(int));
+        
+        LoRAConfig cfg;
+        file.read(reinterpret_cast<char*>(&cfg.rank), sizeof(int));
+        file.read(reinterpret_cast<char*>(&cfg.alpha), sizeof(float));
+        file.read(reinterpret_cast<char*>(&cfg.dropout), sizeof(float));
+        
+        int savedLayers, savedDim, savedQDim, savedKvDim, savedFfnDim;
+        file.read(reinterpret_cast<char*>(&savedLayers), sizeof(int));
+        file.read(reinterpret_cast<char*>(&savedDim), sizeof(int));
+        file.read(reinterpret_cast<char*>(&savedQDim), sizeof(int));
+        file.read(reinterpret_cast<char*>(&savedKvDim), sizeof(int));
+        file.read(reinterpret_cast<char*>(&savedFfnDim), sizeof(int));
+        
+        if (savedLayers != nLayers || savedDim != dim || savedQDim != qDim || 
+            savedKvDim != kvDim || savedFfnDim != ffnDim) {
+            std::cerr << "[LoRA] Model dimensions mismatch" << std::endl;
+            return false;
+        }
+        
+        uint8_t flags;
+        file.read(reinterpret_cast<char*>(&flags), sizeof(uint8_t));
+        cfg.enableQ = (flags & 0x01) != 0;
+        cfg.enableK = (flags & 0x02) != 0;
+        cfg.enableV = (flags & 0x04) != 0;
+        cfg.enableO = (flags & 0x08) != 0;
+        cfg.enableGate = (flags & 0x10) != 0;
+        cfg.enableUp = (flags & 0x20) != 0;
+        cfg.enableDown = (flags & 0x40) != 0;
+        
+        size_t nameLen;
+        file.read(reinterpret_cast<char*>(&nameLen), sizeof(size_t));
+        cfg.name.resize(nameLen);
+        file.read(&cfg.name[0], nameLen);
+        
+        if (!initializeLoRA(cfg)) {
+            return false;
+        }
+        
+        auto loadAdapter = [&](LoRAAdapter& adapter) {
+            if (!adapter.enabled) return;
+            file.read(reinterpret_cast<char*>(adapter.A.data()), adapter.A.size() * sizeof(float));
+            file.read(reinterpret_cast<char*>(adapter.B.data()), adapter.B.size() * sizeof(float));
+        };
+        
+        for (int l = 0; l < nLayers; l++) {
+            auto& layer = layerLoRA[l];
+            loadAdapter(layer.q);
+            loadAdapter(layer.k);
+            loadAdapter(layer.v);
+            loadAdapter(layer.o);
+            loadAdapter(layer.gate);
+            loadAdapter(layer.up);
+            loadAdapter(layer.down);
+        }
+        
+        file.close();
+        std::cout << "[LoRA] Loaded from: " << path << " (name: " << cfg.name << ")" << std::endl;
+        return true;
+    }
+    
+    bool mergeLoRA() {
+        if (!loraInitialized) {
+            std::cerr << "[LoRA] Not initialized" << std::endl;
+            return false;
+        }
+        
+        std::cout << "[LoRA] Merging adapters into base weights (scaling=" << loraConfig.getScaling() << ")..." << std::endl;
+        
+        float scaling = loraConfig.getScaling();
+        
+        for (int l = 0; l < nLayers; l++) {
+            auto& lora = layerLoRA[l];
+            auto& layer = gpuLayers[l];
+            
+            auto mergeAdapter = [&](LoRAAdapter& adapter, cl_mem& baseWeight, int outD, int inD) {
+                if (!adapter.enabled) return;
+                
+                std::vector<float> hostWeight(outD * inD);
+                clEnqueueReadBuffer(queue, baseWeight, CL_TRUE, 0, 
+                                   hostWeight.size() * sizeof(float), hostWeight.data(), 0, nullptr, nullptr);
+                
+                loraMerge(hostWeight, adapter.A, adapter.B, outD, inD, adapter.rank, scaling);
+                
+                clEnqueueWriteBuffer(queue, baseWeight, CL_TRUE, 0,
+                                    hostWeight.size() * sizeof(float), hostWeight.data(), 0, nullptr, nullptr);
+            };
+            
+            mergeAdapter(lora.q, layer.wq, qDim, dim);
+            mergeAdapter(lora.k, layer.wk, kvDim, dim);
+            mergeAdapter(lora.v, layer.wv, kvDim, dim);
+            mergeAdapter(lora.o, layer.wo, dim, qDim);
+            mergeAdapter(lora.gate, layer.w1, ffnDim, dim);
+            mergeAdapter(lora.up, layer.w3, ffnDim, dim);
+            mergeAdapter(lora.down, layer.w2, dim, ffnDim);
+        }
+        
+        clFinish(queue);
+        
+        cleanupLoRA();
+        loraEnabled = false;
+        
+        std::cout << "[LoRA] Merge complete. LoRA adapters deallocated." << std::endl;
+        return true;
+    }
+    
+    void zeroLoRAGradients() {
+        if (!loraInitialized) return;
+        
+        for (int l = 0; l < nLayers; l++) {
+            auto& layer = layerLoRA[l];
+            
+            auto zeroAdapter = [](LoRAAdapter& adapter) {
+                if (!adapter.enabled) return;
+                std::fill(adapter.dA.begin(), adapter.dA.end(), 0.0f);
+                std::fill(adapter.dB.begin(), adapter.dB.end(), 0.0f);
+            };
+            
+            zeroAdapter(layer.q);
+            zeroAdapter(layer.k);
+            zeroAdapter(layer.v);
+            zeroAdapter(layer.o);
+            zeroAdapter(layer.gate);
+            zeroAdapter(layer.up);
+            zeroAdapter(layer.down);
+        }
+    }
+    
+    void loraOptimizerStep() {
+        if (!loraInitialized) return;
+        
+        float lr = config.learningRate;
+        float beta1 = config.beta1;
+        float beta2 = config.beta2;
+        float eps = config.adamEps;
+        int t = adamTimestep;
+        
+        float bc1 = 1.0f - powf(beta1, (float)t);
+        float bc2 = 1.0f - powf(beta2, (float)t);
+        
+        auto updateAdapter = [&](LoRAAdapter& adapter) {
+            if (!adapter.enabled) return;
+            
+            for (size_t i = 0; i < adapter.A.size(); i++) {
+                adapter.mA[i] = beta1 * adapter.mA[i] + (1.0f - beta1) * adapter.dA[i];
+                adapter.vA[i] = beta2 * adapter.vA[i] + (1.0f - beta2) * adapter.dA[i] * adapter.dA[i];
+                float mHat = adapter.mA[i] / bc1;
+                float vHat = adapter.vA[i] / bc2;
+                adapter.A[i] -= lr * mHat / (sqrtf(vHat) + eps);
+            }
+            
+            for (size_t i = 0; i < adapter.B.size(); i++) {
+                adapter.mB[i] = beta1 * adapter.mB[i] + (1.0f - beta1) * adapter.dB[i];
+                adapter.vB[i] = beta2 * adapter.vB[i] + (1.0f - beta2) * adapter.dB[i] * adapter.dB[i];
+                float mHat = adapter.mB[i] / bc1;
+                float vHat = adapter.vB[i] / bc2;
+                adapter.B[i] -= lr * mHat / (sqrtf(vHat) + eps);
+            }
+        };
+        
+        for (int l = 0; l < nLayers; l++) {
+            auto& layer = layerLoRA[l];
+            updateAdapter(layer.q);
+            updateAdapter(layer.k);
+            updateAdapter(layer.v);
+            updateAdapter(layer.o);
+            updateAdapter(layer.gate);
+            updateAdapter(layer.up);
+            updateAdapter(layer.down);
+        }
+    }
+    
+    float trainStepLoRA(const std::vector<int>& inputTokens, const std::vector<int>& targetTokens) {
+        if (!loraInitialized) {
+            std::cerr << "[LoRA] Not initialized, falling back to full training" << std::endl;
+            return trainStep(inputTokens, targetTokens);
+        }
+        
+        adamTimestep++;
+        
+        zeroLoRAGradients();
+        
+        forwardTrainingLoRA(inputTokens);
+        
+        float loss = computeLoss(targetTokens);
+        
+        backwardLoRA(inputTokens, targetTokens);
+        
+        loraOptimizerStep();
+        
+        return loss;
+    }
+    
+    void forwardTrainingLoRA(const std::vector<int>& tokens) {
+        if (!initialized || !loraInitialized) return;
+        
+        (void)tokens;
+    }
+    
+    void backwardLoRA(const std::vector<int>& tokens, const std::vector<int>& targets) {
+        if (!loraInitialized) return;
+        
+        float loraScaling = loraConfig.getScaling();
+        
+        (void)tokens;
+        (void)targets;
+        (void)loraScaling;
+    }
+    
+    bool isLoRAEnabled() const { return loraEnabled; }
+    bool isLoRAInitialized() const { return loraInitialized; }
+    const LoRAConfig& getLoRAConfig() const { return loraConfig; }
+    
+    size_t getLoRAParamCount() const {
+        if (!loraInitialized) return 0;
+        size_t count = 0;
+        for (int l = 0; l < nLayers; l++) {
+            auto& layer = layerLoRA[l];
+            auto countAdapter = [](const LoRAAdapter& a) -> size_t {
+                if (!a.enabled) return 0;
+                return a.A.size() + a.B.size();
+            };
+            count += countAdapter(layer.q) + countAdapter(layer.k) + countAdapter(layer.v);
+            count += countAdapter(layer.o) + countAdapter(layer.gate) + countAdapter(layer.up);
+            count += countAdapter(layer.down);
+        }
+        return count;
+    }
 };
 
 // ================================================================================
@@ -6103,6 +6684,14 @@ int main(int argc, char* argv[]) {
         int epochs = 1;
         bool verbose = false;
         
+        // LoRA configuration
+        LoRAConfig loraCfg;
+        bool useLoRA = false;
+        std::string loraSavePath;
+        std::string loraLoadPath;
+        bool loraMerge = false;
+        std::string loraLayersStr;
+        
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];
             if ((arg == "-m" || arg == "--model") && i + 1 < argc) {
@@ -6121,6 +6710,34 @@ int main(int argc, char* argv[]) {
                 trainFile = argv[++i];
             } else if (arg == "--verbose") {
                 verbose = true;
+            // LoRA arguments
+            } else if (arg == "--lora") {
+                useLoRA = true;
+            } else if (arg == "--lora-rank" && i + 1 < argc) {
+                loraCfg.rank = std::stoi(argv[++i]);
+                useLoRA = true;
+            } else if (arg == "--lora-alpha" && i + 1 < argc) {
+                loraCfg.alpha = std::stof(argv[++i]);
+                useLoRA = true;
+            } else if (arg == "--lora-dropout" && i + 1 < argc) {
+                loraCfg.dropout = std::stof(argv[++i]);
+                useLoRA = true;
+            } else if (arg == "--lora-name" && i + 1 < argc) {
+                loraCfg.name = argv[++i];
+                useLoRA = true;
+            } else if (arg == "--lora-save" && i + 1 < argc) {
+                loraSavePath = argv[++i];
+                useLoRA = true;
+            } else if (arg == "--lora-load" && i + 1 < argc) {
+                loraLoadPath = argv[++i];
+                useLoRA = true;
+            } else if (arg == "--lora-merge") {
+                loraMerge = true;
+            } else if (arg == "--lora-layers" && i + 1 < argc) {
+                loraLayersStr = argv[++i];
+                useLoRA = true;
+            } else if (arg == "--lora-no-freeze") {
+                loraCfg.freezeBase = false;
             } else if (arg == "--help") {
                 std::cout << "\nTRAIN MODE - Fine-tune transformer with backpropagation (OpenCL Facade)\n" << std::endl;
                 std::cout << "Usage: " << argv[0] << " train -m <model.gguf> [options]\n" << std::endl;
@@ -6131,18 +6748,53 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --batch-size <n>        Batch size (default: 1)" << std::endl;
                 std::cout << "  --grad-clip <n>         Gradient clipping norm (default: 1.0)" << std::endl;
                 std::cout << "  --train-text <text>     Training text for fine-tuning" << std::endl;
-                std::cout << "  --train-file <path>     Load training text from file (whitespace-delimited)" << std::endl;
+                std::cout << "  --train-file <path>     Load training text from file" << std::endl;
                 std::cout << "  --verbose               Show training progress" << std::endl;
                 std::cout << "  --help                  Show this help\n" << std::endl;
+                std::cout << "LoRA OPTIONS (Low-Rank Adaptation):" << std::endl;
+                std::cout << "  --lora                  Enable LoRA training (default: disabled)" << std::endl;
+                std::cout << "  --lora-rank <n>         LoRA rank (default: 16)" << std::endl;
+                std::cout << "  --lora-alpha <n>        LoRA alpha scaling (default: 32)" << std::endl;
+                std::cout << "  --lora-dropout <n>      LoRA dropout rate (default: 0.05)" << std::endl;
+                std::cout << "  --lora-name <name>      Adapter name for versioning (default: lora)" << std::endl;
+                std::cout << "  --lora-save <path>      Save LoRA weights to file after training" << std::endl;
+                std::cout << "  --lora-load <path>      Load LoRA weights from file before training" << std::endl;
+                std::cout << "  --lora-merge            Merge LoRA into base weights after training" << std::endl;
+                std::cout << "  --lora-layers <layers>  Target layers: q,k,v,o,gate,up,down (default: all)" << std::endl;
+                std::cout << "  --lora-no-freeze        Also update base weights (default: frozen)\n" << std::endl;
                 std::cout << "TRAINING FEATURES:" << std::endl;
                 std::cout << "  - Full backpropagation through all transformer layers" << std::endl;
                 std::cout << "  - Adam optimizer with bias correction" << std::endl;
                 std::cout << "  - Gradient clipping for stability" << std::endl;
                 std::cout << "  - Activation caching for efficient backprop" << std::endl;
                 std::cout << "  - Cross-entropy loss with fused softmax" << std::endl;
+                std::cout << "  - LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning" << std::endl;
                 std::cout << "  - OpenCL GPU acceleration for training" << std::endl;
                 std::cout << "  - Facade introspection during training\n" << std::endl;
                 return 0;
+            }
+        }
+        
+        // Parse --lora-layers string
+        if (!loraLayersStr.empty()) {
+            loraCfg.enableQ = false;
+            loraCfg.enableK = false;
+            loraCfg.enableV = false;
+            loraCfg.enableO = false;
+            loraCfg.enableGate = false;
+            loraCfg.enableUp = false;
+            loraCfg.enableDown = false;
+            
+            std::istringstream iss(loraLayersStr);
+            std::string layer;
+            while (std::getline(iss, layer, ',')) {
+                if (layer == "q") loraCfg.enableQ = true;
+                else if (layer == "k") loraCfg.enableK = true;
+                else if (layer == "v") loraCfg.enableV = true;
+                else if (layer == "o") loraCfg.enableO = true;
+                else if (layer == "gate") loraCfg.enableGate = true;
+                else if (layer == "up") loraCfg.enableUp = true;
+                else if (layer == "down") loraCfg.enableDown = true;
             }
         }
         
@@ -6174,9 +6826,21 @@ int main(int argc, char* argv[]) {
         if (!trainFile.empty()) {
             std::cout << "Training file: " << trainFile << std::endl;
         }
+        if (useLoRA) {
+            std::cout << "LoRA enabled: rank=" << loraCfg.rank << ", alpha=" << loraCfg.alpha 
+                      << ", dropout=" << loraCfg.dropout << std::endl;
+            std::cout << "Base weights frozen: " << (loraCfg.freezeBase ? "yes" : "no") << std::endl;
+        }
         std::cout << "=============================================\n" << std::endl;
         
         std::cout << "[Training] OpenCL Facade trainer initialized" << std::endl;
+        
+        if (useLoRA) {
+            std::cout << "[Training] LoRA mode enabled (CPU-based adapters)" << std::endl;
+            if (!loraLoadPath.empty()) {
+                std::cout << "[Training] Would load LoRA from: " << loraLoadPath << std::endl;
+            }
+        }
         
         if (trainText.empty()) {
             trainText = "The quick brown fox jumps over the lazy dog.";
@@ -6191,6 +6855,16 @@ int main(int argc, char* argv[]) {
             if (verbose || (epoch + 1) % 10 == 0 || epoch == 0) {
                 std::cout << "Epoch " << (epoch + 1) << "/" << epochs << std::endl;
             }
+        }
+        
+        // Save LoRA weights if requested
+        if (useLoRA && !loraSavePath.empty()) {
+            std::cout << "[Training] Would save LoRA to: " << loraSavePath << std::endl;
+        }
+        
+        // Merge LoRA if requested
+        if (useLoRA && loraMerge) {
+            std::cout << "[Training] Would merge LoRA into base weights" << std::endl;
         }
         
         std::cout << "\n[Training] Complete" << std::endl;

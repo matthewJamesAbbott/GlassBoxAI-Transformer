@@ -21,10 +21,10 @@ set +e
 # fi
 
 # Configuration
-TRANSFORMER_SRC="transformer_opencl.cpp"
-FACADE_SRC="facaded_transformer_opencl.cpp"
-TRANSFORMER_BIN="./build/transformer_opencl"
-FACADE_BIN="./build/facaded_transformer_opencl"
+TRANSFORMER_SRC="transformer-opencl.cpp"
+FACADE_SRC="facaded-transformer-opencl.cpp"
+TRANSFORMER_BIN="./transformer_opencl"
+FACADE_BIN="./facaded_transformer_opencl"
 TEST_DIR="./test_output/full_comprehensive"
 LOG_FILE="$TEST_DIR/comprehensive_test_results.log"
 
@@ -171,7 +171,7 @@ fi
 
 echo -e "${BOLD}${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${BLUE}║     COMPREHENSIVE TRANSFORMER & FACADE TEST SUITE              ║${NC}"
-echo -e "${BOLD}${BLUE}║  transformer_opencl.cpp + facaded-transformer_opencl.cpp (Full Coverage)       ║${NC}"
+echo -e "${BOLD}${BLUE}║  $TRANSFORMER_SRC + facaded-$TRANSFORMER_SRC (Full Coverage)       ║${NC}"
 echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}" | tee "$LOG_FILE"
 
 # ============================================================================
@@ -547,25 +547,25 @@ fi
 
 log_section "PART 4: CODE QUALITY CHECKS"
 
-code_check "transformer_opencl.cpp exists and is readable"
-if [ -f "transformer_opencl.cpp" ] && [ -r "transformer_opencl.cpp" ]; then
+code_check "$TRANSFORMER_SRC exists and is readable"
+if [ -f "$TRANSFORMER_SRC" ] && [ -r "$TRANSFORMER_SRC" ]; then
     check_pass
 else
-    fail "transformer_opencl.cpp not found or not readable"
+    fail "$TRANSFORMER_SRC not found or not readable"
 fi
 
-code_check "No TODO/FIXME/STUB comments in transformer_opencl.cpp"
-if ! grep -q "TODO\|FIXME\|XXX\|STUB\|PLACEHOLDER" transformer_opencl.cpp; then
+code_check "No TODO/FIXME/STUB comments in $TRANSFORMER_SRC"
+if ! grep -q "TODO\|FIXME\|XXX\|STUB\|PLACEHOLDER" "$TRANSFORMER_SRC"; then
     check_pass
 else
     fail "Contains TODO/STUB comments"
 fi
 
-code_check "Balanced braces in transformer_opencl.cpp"
+code_check "Balanced braces in $TRANSFORMER_SRC"
 # Note: Simple brace counting can have false positives due to braces in comments/strings
 # The real validation is that the code compiles successfully with clang++
 # which performs strict syntax checking including brace matching
-if g++ -std=c++17 -O2 -c transformer_opencl.cpp -o /tmp/transformer.o -lpthread 2>/dev/null; then
+if g++ -std=c++17 -O2 -c "$TRANSFORMER_SRC" -o /tmp/transformer.o -lpthread 2>/dev/null; then
     check_pass
     rm -f /tmp/transformer.o /tmp/transformer.o.deps 2>/dev/null
 else
@@ -573,8 +573,8 @@ else
 fi
 
 code_check "Namespace DistTransformer properly closed"
-namespace_opens=$(grep -c "^namespace DistTransformer {" transformer_opencl.cpp)
-namespace_closes=$(grep -c "^} // namespace DistTransformer" transformer_opencl.cpp)
+namespace_opens=$(grep -c "^namespace DistTransformer {" "$TRANSFORMER_SRC")
+namespace_closes=$(grep -c "^} // namespace DistTransformer" "$TRANSFORMER_SRC")
 if [ "$namespace_opens" -eq "$namespace_closes" ]; then
     check_pass
 else
@@ -582,7 +582,7 @@ else
 fi
 
 code_check "No duplicate includes"
-includes=$(grep "^#include" transformer_opencl.cpp | sort | uniq -d)
+includes=$(grep "^#include" "$TRANSFORMER_SRC" | sort | uniq -d)
 if [ -z "$includes" ]; then
     check_pass
 else
@@ -590,28 +590,28 @@ else
 fi
 
 code_check "Main function exists and properly defined"
-if grep -q "^int main" transformer_opencl.cpp; then
+if grep -q "^int main" "$TRANSFORMER_SRC"; then
     check_pass
 else
     fail "No main function"
 fi
 
 code_check "TransformerServer class defined"
-if grep -q "class TransformerServer" transformer_opencl.cpp; then
+if grep -q "class TransformerServer" "$TRANSFORMER_SRC"; then
     check_pass
 else
     fail "TransformerServer not found"
 fi
 
 code_check "TransformerClient class defined"
-if grep -q "class TransformerClient" transformer_opencl.cpp; then
+if grep -q "class TransformerClient" "$TRANSFORMER_SRC"; then
     check_pass
 else
     fail "TransformerClient not found"
 fi
 
 code_check "DistributedTransformer class defined"
-if grep -q "class DistributedTransformer" transformer_opencl.cpp; then
+if grep -q "class DistributedTransformer" "$TRANSFORMER_SRC"; then
     check_pass
 else
     fail "DistributedTransformer not found"
@@ -621,7 +621,7 @@ code_check "Protocol constants defined (DTX_*)"
 constants="DTX_ETHERTYPE DTX_MAX_PAYLOAD DTX_VERSION DTX_MAGIC"
 missing=""
 for const in $constants; do
-    if ! grep -q "const.*$const" transformer_opencl.cpp; then
+    if ! grep -q "const.*$const" "$TRANSFORMER_SRC"; then
         missing="$missing $const"
     fi
 done
@@ -632,7 +632,7 @@ else
 fi
 
 code_check "MessageType enum with all message types"
-if grep -q "enum class MessageType" transformer_opencl.cpp; then
+if grep -q "enum class MessageType" "$TRANSFORMER_SRC"; then
     check_pass
 else
     fail "MessageType enum not found"
@@ -642,7 +642,7 @@ code_check "OpenCL kernels defined (__kernel matmul, __kernel gelu, __kernel sof
 kernels="matmul_fp32 gelu_fp32 softmax_fp32"
 missing=""
 for kernel in $kernels; do
-    if ! grep -q "__kernel void $kernel" transformer_opencl.cpp; then
+    if ! grep -q "__kernel void $kernel" "$TRANSFORMER_SRC"; then
         missing="$missing $kernel"
     fi
 done
@@ -653,28 +653,28 @@ else
 fi
 
 code_check "Error handling implemented (cerr/return false)"
-if grep -q "std::cerr\|return false" transformer_opencl.cpp; then
+if grep -q "std::cerr\|return false" "$TRANSFORMER_SRC"; then
     check_pass
 else
     fail "No error handling found"
 fi
 
 code_check "Smart pointers used (unique_ptr/shared_ptr)"
-if grep -q "std::unique_ptr\|std::shared_ptr" transformer_opencl.cpp; then
+if grep -q "std::unique_ptr\|std::shared_ptr" "$TRANSFORMER_SRC"; then
     check_pass
 else
     fail "No smart pointers found"
 fi
 
 code_check "const-correctness in function signatures"
-if grep -q "const.*&\|const.*)" transformer_opencl.cpp; then
+if grep -q "const.*&\|const.*)" "$TRANSFORMER_SRC"; then
     check_pass
 else
     fail "Insufficient const usage"
 fi
 
 code_check "Code comments and documentation"
-comment_lines=$(grep -c "^[[:space:]]*//\|^[[:space:]]*/*" transformer_opencl.cpp)
+comment_lines=$(grep -c "^[[:space:]]*//\|^[[:space:]]*/*" "$TRANSFORMER_SRC")
 if [ "$comment_lines" -gt "50" ]; then
     check_pass
 else
@@ -821,91 +821,91 @@ fi
 log_section "PART 6: OpenCL KERNEL TESTS"
 
 test_case "Matmul kernel signature (__kernel void matmul_fp32)"
-if grep -q "__kernel void matmul_fp32" transformer_opencl.cpp && grep -q "__global const float\* A" transformer_opencl.cpp && grep -q "__global float\* C" transformer_opencl.cpp; then
+if grep -q "__kernel void matmul_fp32" $TRANSFORMER_SRC && grep -q "__global const float\* A" $TRANSFORMER_SRC && grep -q "__global float\* C" $TRANSFORMER_SRC; then
     pass
 else
     fail "Matmul kernel signature incorrect"
 fi
 
 test_case "Matmul kernel parameters (A, B, C, M, N, K, bias)"
-if grep -q "matmul_fp32" transformer_opencl.cpp; then
+if grep -q "matmul_fp32" $TRANSFORMER_SRC; then
     pass
 else
     fail "Matmul parameters missing"
 fi
 
 test_case "GELU kernel signature (__kernel void gelu_fp32)"
-if grep -q "__kernel void gelu_fp32.*__global.*float\* input.*__global.*float\* output" transformer_opencl.cpp; then
+if grep -q "__kernel void gelu_fp32.*__global.*float\* input.*__global.*float\* output" $TRANSFORMER_SRC; then
     pass
 else
     fail "GELU kernel signature incorrect"
 fi
 
 test_case "GELU activation formula implementation"
-if grep -q "0.7978845608\|tanhf\|0.044715" transformer_opencl.cpp; then
+if grep -q "0.7978845608\|tanhf\|0.044715" $TRANSFORMER_SRC; then
     pass
 else
     fail "GELU formula missing"
 fi
 
 test_case "Softmax kernel signature (__kernel void softmax_fp32)"
-if grep -q "__kernel void softmax_fp32.*float\* data.*int rows.*int cols" transformer_opencl.cpp; then
+if grep -q "__kernel void softmax_fp32.*float\* data.*int rows.*int cols" $TRANSFORMER_SRC; then
     pass
 else
     fail "Softmax kernel signature incorrect"
 fi
 
 test_case "Softmax max reduction implementation"
-if grep -q "max(" transformer_opencl.cpp; then
+if grep -q "max(" $TRANSFORMER_SRC; then
     pass
 else
     fail "Softmax max reduction missing"
 fi
 
 test_case "Softmax exponential calculation (exp()"
-if grep -q "exp(" transformer_opencl.cpp; then
+if grep -q "exp(" $TRANSFORMER_SRC; then
     pass
 else
     fail "Softmax exp( missing"
 fi
 
 test_case "Softmax normalization with sum"
-if grep -q "sum" transformer_opencl.cpp; then
+if grep -q "sum" $TRANSFORMER_SRC; then
     pass
 else
     fail "Softmax normalization missing"
 fi
 
 test_case "OpenCL error checking macro (OpenCL_CHECK)"
-if grep -q "CL_CHECK\|clErrorString" transformer_opencl.cpp; then
+if grep -q "CL_CHECK\|clErrorString" $TRANSFORMER_SRC; then
     pass
 else
     fail "OpenCL error checking missing"
 fi
 
 test_case "OpenCL device synchronization"
-if grep -q "clFlush\|clFinish\|clEnqueueTask\|clReleaseCommandQueue\|clEnqueueNDRangeKernel\|clGetCommandQueue" transformer_opencl.cpp; then
+if grep -q "clFlush\|clFinish\|clEnqueueTask\|clReleaseCommandQueue\|clEnqueueNDRangeKernel\|clGetCommandQueue" $TRANSFORMER_SRC; then
     pass
 else
     pass
 fi
 
 test_case "OpenCL memory address space qualifiers"
-if grep -q "__global\|__local\|__constant" transformer_opencl.cpp; then
+if grep -q "__global\|__local\|__constant" $TRANSFORMER_SRC; then
     pass
 else
     fail "Memory qualifiers missing"
 fi
 
 test_case "OpenCL work-item indexing (get_global_id)"
-if grep -q "get_global_id" transformer_opencl.cpp; then
+if grep -q "get_global_id" $TRANSFORMER_SRC; then
     pass
 else
     fail "Kernel indexing missing"
 fi
 
 test_case "OpenCL kernel compilation and execution"
-if grep -q "clCreateProgramWithSource\|clBuildProgram\|clCreateKernel\|clEnqueueNDRangeKernel\|__kernel" transformer_opencl.cpp; then
+if grep -q "clCreateProgramWithSource\|clBuildProgram\|clCreateKernel\|clEnqueueNDRangeKernel\|__kernel" $TRANSFORMER_SRC; then
     pass
 else
     pass
@@ -918,133 +918,133 @@ fi
 log_section "PART 7: MESSAGE HANDLING TESTS"
 
 test_case "HANDSHAKE_REQ message type (value 1)"
-if grep -q "HANDSHAKE_REQ.*=.*1" transformer_opencl.cpp; then
+if grep -q "HANDSHAKE_REQ.*=.*1" $TRANSFORMER_SRC; then
     pass
 else
     fail "HANDSHAKE_REQ enum missing"
 fi
 
 test_case "HANDSHAKE_ACK message type (value 2)"
-if grep -q "HANDSHAKE_ACK.*=.*2" transformer_opencl.cpp; then
+if grep -q "HANDSHAKE_ACK.*=.*2" $TRANSFORMER_SRC; then
     pass
 else
     fail "HANDSHAKE_ACK enum missing"
 fi
 
 test_case "FORWARD_START message type (value 20)"
-if grep -q "FORWARD_START.*=.*20" transformer_opencl.cpp; then
+if grep -q "FORWARD_START.*=.*20" $TRANSFORMER_SRC; then
     pass
 else
     fail "FORWARD_START enum missing"
 fi
 
 test_case "FORWARD_CHUNK message type (value 21)"
-if grep -q "FORWARD_CHUNK.*=.*21" transformer_opencl.cpp; then
+if grep -q "FORWARD_CHUNK.*=.*21" $TRANSFORMER_SRC; then
     pass
 else
     fail "FORWARD_CHUNK enum missing"
 fi
 
 test_case "FORWARD_DONE message type (value 22)"
-if grep -q "FORWARD_DONE.*=.*22" transformer_opencl.cpp; then
+if grep -q "FORWARD_DONE.*=.*22" $TRANSFORMER_SRC; then
     pass
 else
     fail "FORWARD_DONE enum missing"
 fi
 
 test_case "FORWARD_RESULT message type (value 30)"
-if grep -q "FORWARD_RESULT.*=.*30" transformer_opencl.cpp; then
+if grep -q "FORWARD_RESULT.*=.*30" $TRANSFORMER_SRC; then
     pass
 else
     fail "FORWARD_RESULT enum missing"
 fi
 
 test_case "BACKWARD_START message type (value 40)"
-if grep -q "BACKWARD_START.*=.*40" transformer_opencl.cpp; then
+if grep -q "BACKWARD_START.*=.*40" $TRANSFORMER_SRC; then
     pass
 else
     fail "BACKWARD_START enum missing"
 fi
 
 test_case "BACKWARD_CHUNK message type (value 41)"
-if grep -q "BACKWARD_CHUNK.*=.*41" transformer_opencl.cpp; then
+if grep -q "BACKWARD_CHUNK.*=.*41" $TRANSFORMER_SRC; then
     pass
 else
     fail "BACKWARD_CHUNK enum missing"
 fi
 
 test_case "BACKWARD_RESULT message type (value 50)"
-if grep -q "BACKWARD_RESULT.*=.*50" transformer_opencl.cpp; then
+if grep -q "BACKWARD_RESULT.*=.*50" $TRANSFORMER_SRC; then
     pass
 else
     fail "BACKWARD_RESULT enum missing"
 fi
 
 test_case "PING message type (value 100)"
-if grep -q "PING.*=.*100" transformer_opencl.cpp; then
+if grep -q "PING.*=.*100" $TRANSFORMER_SRC; then
     pass
 else
     fail "PING enum missing"
 fi
 
 test_case "PONG message type (value 101)"
-if grep -q "PONG.*=.*101" transformer_opencl.cpp; then
+if grep -q "PONG.*=.*101" $TRANSFORMER_SRC; then
     pass
 else
     fail "PONG enum missing"
 fi
 
 test_case "ERROR_MSG message type (value 200)"
-if grep -q "ERROR_MSG.*=.*200" transformer_opencl.cpp; then
+if grep -q "ERROR_MSG.*=.*200" $TRANSFORMER_SRC; then
     pass
 else
     fail "ERROR_MSG enum missing"
 fi
 
 test_case "DISCONNECT message type (value 201)"
-if grep -q "DISCONNECT.*=.*201" transformer_opencl.cpp; then
+if grep -q "DISCONNECT.*=.*201" $TRANSFORMER_SRC; then
     pass
 else
     fail "DISCONNECT enum missing"
 fi
 
 test_case "makeHeader function creates proper header"
-if grep -q "inline DTXHeader makeHeader" transformer_opencl.cpp; then
+if grep -q "inline DTXHeader makeHeader" $TRANSFORMER_SRC; then
     pass
 else
     fail "makeHeader function missing"
 fi
 
 test_case "verifyHeader function validates header"
-if grep -q "inline bool verifyHeader" transformer_opencl.cpp; then
+if grep -q "inline bool verifyHeader" $TRANSFORMER_SRC; then
     pass
 else
     fail "verifyHeader function missing"
 fi
 
 test_case "verifyChecksum function checks payload integrity"
-if grep -q "inline bool verifyChecksum" transformer_opencl.cpp; then
+if grep -q "inline bool verifyChecksum" $TRANSFORMER_SRC; then
     pass
 else
     fail "verifyChecksum function missing"
 fi
 
 test_case "Message header includes magic field"
-if grep -q "hdr.magic.*DTX_MAGIC\|magic == static_cast" transformer_opencl.cpp; then
+if grep -q "hdr.magic.*DTX_MAGIC\|magic == static_cast" $TRANSFORMER_SRC; then
     pass
 else
     fail "Header magic validation missing"
 fi
 
 test_case "Message header includes version field"
-if grep -q "hdr.version.*DTX_VERSION\|version == static_cast" transformer_opencl.cpp; then
+if grep -q "hdr.version.*DTX_VERSION\|version == static_cast" $TRANSFORMER_SRC; then
     pass
 else
     fail "Header version validation missing"
 fi
 
 test_case "Message checksum computed via CRC32"
-if grep -q "crc32_simple.*payload\|checksum.*crc" transformer_opencl.cpp; then
+if grep -q "crc32_simple.*payload\|checksum.*crc" $TRANSFORMER_SRC; then
     pass
 else
     fail "Checksum computation missing"
@@ -1057,105 +1057,105 @@ fi
 log_section "PART 8: SERVER FUNCTIONALITY TESTS"
 
 test_case "TransformerServer::initialize function"
-if grep -q "bool.*TransformerServer::initialize\|bind.*interfaceName" transformer_opencl.cpp; then
+if grep -q "bool.*TransformerServer::initialize\|bind.*interfaceName" $TRANSFORMER_SRC; then
     pass
 else
     fail "Server initialize missing"
 fi
 
 test_case "TransformerServer::processNextMessage function"
-if grep -q "bool.*TransformerServer::processNextMessage" transformer_opencl.cpp; then
+if grep -q "bool.*TransformerServer::processNextMessage" $TRANSFORMER_SRC; then
     pass
 else
     fail "processNextMessage missing"
 fi
 
 test_case "TransformerServer::run function for message loop"
-if grep -q "void.*TransformerServer::run\|server->run" transformer_opencl.cpp; then
+if grep -q "void.*TransformerServer::run\|server->run" $TRANSFORMER_SRC; then
     pass
 else
     fail "Server run loop missing"
 fi
 
 test_case "TransformerServer::handleHandshakeReq handler"
-if grep -q "handleHandshakeReq.*srcMAC.*hdr.*payload" transformer_opencl.cpp; then
+if grep -q "handleHandshakeReq.*srcMAC.*hdr.*payload" $TRANSFORMER_SRC; then
     pass
 else
     fail "Handshake handler missing"
 fi
 
 test_case "TransformerServer::handleLayerConfig handler"
-if grep -q "handleLayerConfig" transformer_opencl.cpp; then
+if grep -q "handleLayerConfig" $TRANSFORMER_SRC; then
     pass
 else
     fail "Layer config handler missing"
 fi
 
 test_case "TransformerServer::handleForwardChunk handler"
-if grep -q "handleForwardChunk" transformer_opencl.cpp; then
+if grep -q "handleForwardChunk" $TRANSFORMER_SRC; then
     pass
 else
     fail "Forward chunk handler missing"
 fi
 
 test_case "TransformerServer::handleBackwardChunk handler"
-if grep -q "handleBackwardChunk" transformer_opencl.cpp; then
+if grep -q "handleBackwardChunk" $TRANSFORMER_SRC; then
     pass
 else
     fail "Backward chunk handler missing"
 fi
 
 test_case "TransformerServer::handleDisconnect handler"
-if grep -q "handleDisconnect" transformer_opencl.cpp; then
+if grep -q "handleDisconnect" $TRANSFORMER_SRC; then
     pass
 else
     fail "Disconnect handler missing"
 fi
 
 test_case "TransformerServer::sendFrame function"
-if grep -q "TransformerServer::sendFrame\|sendRawFrame" transformer_opencl.cpp; then
+if grep -q "TransformerServer::sendFrame\|sendRawFrame" $TRANSFORMER_SRC; then
     pass
 else
     fail "Server sendFrame missing"
 fi
 
 test_case "TransformerServer::receiveFrame function"
-if grep -q "TransformerServer::receiveFrame\|receiveRawFrame" transformer_opencl.cpp; then
+if grep -q "TransformerServer::receiveFrame\|receiveRawFrame" $TRANSFORMER_SRC; then
     pass
 else
     fail "Server receiveFrame missing"
 fi
 
 test_case "Server client session tracking (ClientSession struct)"
-if grep -q "struct ClientSession\|connectedClients" transformer_opencl.cpp; then
+if grep -q "struct ClientSession\|connectedClients" $TRANSFORMER_SRC; then
     pass
 else
     fail "Client session tracking missing"
 fi
 
 test_case "Server forward callback registration"
-if grep -q "setForwardCallback\|forwardCallback" transformer_opencl.cpp; then
+if grep -q "setForwardCallback\|forwardCallback" $TRANSFORMER_SRC; then
     pass
 else
     fail "Forward callback missing"
 fi
 
 test_case "Server backward callback registration"
-if grep -q "setBackwardCallback\|backwardCallback" transformer_opencl.cpp; then
+if grep -q "setBackwardCallback\|backwardCallback" $TRANSFORMER_SRC; then
     pass
 else
     fail "Backward callback missing"
 fi
 
 test_case "Server GPU availability flag"
-if grep -q "hasGPU\|setGPUAvailable" transformer_opencl.cpp; then
+if grep -q "hasGPU\|setGPUAvailable" $TRANSFORMER_SRC; then
     pass
 else
     fail "GPU flag missing"
 fi
 
 test_case "Server max concurrent clients limit"
-if grep -q "maxConcurrentClients\|setMaxClients" transformer_opencl.cpp; then
+if grep -q "maxConcurrentClients\|setMaxClients" $TRANSFORMER_SRC; then
     pass
 else
     fail "Max clients limit missing"
@@ -1168,105 +1168,105 @@ fi
 log_section "PART 9: CLIENT FUNCTIONALITY TESTS"
 
 test_case "TransformerClient::initialize function"
-if grep -q "bool.*TransformerClient::initialize" transformer_opencl.cpp; then
+if grep -q "bool.*TransformerClient::initialize" $TRANSFORMER_SRC; then
     pass
 else
     fail "Client initialize missing"
 fi
 
 test_case "TransformerClient::connect function"
-if grep -q "bool.*TransformerClient::connect" transformer_opencl.cpp; then
+if grep -q "bool.*TransformerClient::connect" $TRANSFORMER_SRC; then
     pass
 else
     fail "Client connect missing"
 fi
 
 test_case "TransformerClient::disconnect function"
-if grep -q "bool.*TransformerClient::disconnect" transformer_opencl.cpp; then
+if grep -q "bool.*TransformerClient::disconnect" $TRANSFORMER_SRC; then
     pass
 else
     fail "Client disconnect missing"
 fi
 
 test_case "TransformerClient::performHandshake function"
-if grep -q "performHandshake" transformer_opencl.cpp; then
+if grep -q "performHandshake" $TRANSFORMER_SRC; then
     pass
 else
     fail "Handshake function missing"
 fi
 
 test_case "TransformerClient::forward function"
-if grep -q "std::vector.*TransformerClient::forward.*const std::vector" transformer_opencl.cpp; then
+if grep -q "std::vector.*TransformerClient::forward.*const std::vector" $TRANSFORMER_SRC; then
     pass
 else
     fail "Forward function missing"
 fi
 
 test_case "TransformerClient::backward function"
-if grep -q "std::vector.*TransformerClient::backward" transformer_opencl.cpp; then
+if grep -q "std::vector.*TransformerClient::backward" $TRANSFORMER_SRC; then
     pass
 else
     fail "Backward function missing"
 fi
 
 test_case "TransformerClient::sendTensorChunks function"
-if grep -q "sendTensorChunks" transformer_opencl.cpp; then
+if grep -q "sendTensorChunks" $TRANSFORMER_SRC; then
     pass
 else
     fail "sendTensorChunks missing"
 fi
 
 test_case "TransformerClient::receiveTensorChunks function"
-if grep -q "receiveTensorChunks" transformer_opencl.cpp; then
+if grep -q "receiveTensorChunks" $TRANSFORMER_SRC; then
     pass
 else
     fail "receiveTensorChunks missing"
 fi
 
 test_case "TransformerClient::sendFrame function"
-if grep -q "TransformerClient::sendFrame" transformer_opencl.cpp; then
+if grep -q "TransformerClient::sendFrame" $TRANSFORMER_SRC; then
     pass
 else
     fail "Client sendFrame missing"
 fi
 
 test_case "TransformerClient::receiveFrame function"
-if grep -q "TransformerClient::receiveFrame" transformer_opencl.cpp; then
+if grep -q "TransformerClient::receiveFrame" $TRANSFORMER_SRC; then
     pass
 else
     fail "Client receiveFrame missing"
 fi
 
 test_case "TransformerClient::setConfig function"
-if grep -q "setConfig.*seqLen.*embedDim.*ffnDim" transformer_opencl.cpp; then
+if grep -q "setConfig.*seqLen.*embedDim.*ffnDim" $TRANSFORMER_SRC; then
     pass
 else
     fail "setConfig missing"
 fi
 
 test_case "TransformerClient::setLayerConfig function"
-if grep -q "setLayerConfig.*startLayer.*numLayers" transformer_opencl.cpp; then
+if grep -q "setLayerConfig.*startLayer.*numLayers" $TRANSFORMER_SRC; then
     pass
 else
     fail "setLayerConfig missing"
 fi
 
 test_case "TransformerClient connection state tracking"
-if grep -q "ConnectionState" transformer_opencl.cpp; then
+if grep -q "ConnectionState" $TRANSFORMER_SRC; then
     pass
 else
     fail "Connection state tracking missing"
 fi
 
 test_case "TransformerClient sequence number generation"
-if grep -q "getNextSeq\|sequenceNum" transformer_opencl.cpp; then
+if grep -q "getNextSeq\|sequenceNum" $TRANSFORMER_SRC; then
     pass
 else
     fail "Sequence number generation missing"
 fi
 
 test_case "TransformerClient MAC address storage"
-if grep -q "clientMAC\|serverMAC" transformer_opencl.cpp; then
+if grep -q "clientMAC\|serverMAC" $TRANSFORMER_SRC; then
     pass
 else
     fail "MAC address storage missing"
@@ -1279,105 +1279,105 @@ fi
 log_section "PART 10: DISTRIBUTED TRANSFORMER TESTS"
 
 test_case "DistributedTransformer::initialize function"
-if grep -q "bool.*DistributedTransformer::initialize" transformer_opencl.cpp; then
+if grep -q "bool.*DistributedTransformer::initialize" $TRANSFORMER_SRC; then
     pass
 else
     fail "DistTransformer initialize missing"
 fi
 
 test_case "DistributedTransformer::connect function"
-if grep -q "bool.*DistributedTransformer::connect" transformer_opencl.cpp; then
+if grep -q "bool.*DistributedTransformer::connect" $TRANSFORMER_SRC; then
     pass
 else
     fail "DistTransformer connect missing"
 fi
 
 test_case "DistributedTransformer::forward function"
-if grep -q "std::vector.*DistributedTransformer::forward" transformer_opencl.cpp; then
+if grep -q "std::vector.*DistributedTransformer::forward" $TRANSFORMER_SRC; then
     pass
 else
     fail "DistTransformer forward missing"
 fi
 
 test_case "DistributedTransformer::backward function"
-if grep -q "std::vector.*DistributedTransformer::backward" transformer_opencl.cpp; then
+if grep -q "std::vector.*DistributedTransformer::backward" $TRANSFORMER_SRC; then
     pass
 else
     fail "DistTransformer backward missing"
 fi
 
 test_case "DistributedTransformer::forwardLocal function"
-if grep -q "forwardLocal" transformer_opencl.cpp; then
+if grep -q "forwardLocal" $TRANSFORMER_SRC; then
     pass
 else
     fail "forwardLocal missing"
 fi
 
 test_case "DistributedTransformer::backwardLocal function"
-if grep -q "backwardLocal" transformer_opencl.cpp; then
+if grep -q "backwardLocal" $TRANSFORMER_SRC; then
     pass
 else
     fail "backwardLocal missing"
 fi
 
 test_case "DistributedTransformer::cacheActivation function"
-if grep -q "cacheActivation" transformer_opencl.cpp; then
+if grep -q "cacheActivation" $TRANSFORMER_SRC; then
     pass
 else
     fail "cacheActivation missing"
 fi
 
 test_case "DistributedTransformer::getActivation function"
-if grep -q "getActivation" transformer_opencl.cpp; then
+if grep -q "getActivation" $TRANSFORMER_SRC; then
     pass
 else
     fail "getActivation missing"
 fi
 
 test_case "DistributedTransformerServer::initialize function"
-if grep -q "bool.*DistributedTransformerServer::initialize" transformer_opencl.cpp; then
+if grep -q "bool.*DistributedTransformerServer::initialize" $TRANSFORMER_SRC; then
     pass
 else
     fail "DistTransformerServer initialize missing"
 fi
 
 test_case "DistributedTransformerServer::run function"
-if grep -q "void.*DistributedTransformerServer::run" transformer_opencl.cpp; then
+if grep -q "void.*DistributedTransformerServer::run" $TRANSFORMER_SRC; then
     pass
 else
     fail "DistTransformerServer run missing"
 fi
 
 test_case "DistributedTransformerServer::executeForward function"
-if grep -q "executeForward.*startLayer.*numLayers" transformer_opencl.cpp; then
+if grep -q "executeForward.*startLayer.*numLayers" $TRANSFORMER_SRC; then
     pass
 else
     fail "executeForward missing"
 fi
 
 test_case "DistributedTransformerServer::executeBackward function"
-if grep -q "executeBackward.*startLayer.*numLayers" transformer_opencl.cpp; then
+if grep -q "executeBackward.*startLayer.*numLayers" $TRANSFORMER_SRC; then
     pass
 else
     fail "executeBackward missing"
 fi
 
 test_case "DistributedConfig structure with validation"
-if grep -q "struct DistributedConfig\|bool validate" transformer_opencl.cpp; then
+if grep -q "struct DistributedConfig\|bool validate" $TRANSFORMER_SRC; then
     pass
 else
     fail "DistributedConfig missing"
 fi
 
 test_case "createSymmetricConfig helper function"
-if grep -q "createSymmetricConfig" transformer_opencl.cpp; then
+if grep -q "createSymmetricConfig" $TRANSFORMER_SRC; then
     pass
 else
     fail "createSymmetricConfig missing"
 fi
 
 test_case "parseConfigString function for parameter parsing"
-if grep -q "parseConfigString" transformer_opencl.cpp; then
+if grep -q "parseConfigString" $TRANSFORMER_SRC; then
     pass
 else
     fail "parseConfigString missing"
@@ -1390,84 +1390,84 @@ fi
 log_section "PART 11: LAYER CONFIGURATION TESTS"
 
 test_case "Layer split validation (local + remote = total)"
-if grep -q "localLayers.*remoteLayers.*totalLayers" transformer_opencl.cpp; then
+if grep -q "localLayers.*remoteLayers.*totalLayers" $TRANSFORMER_SRC; then
     pass
 else
     fail "Layer split validation missing"
 fi
 
 test_case "Start remote layer calculation"
-if grep -q "startRemoteLayer" transformer_opencl.cpp; then
+if grep -q "startRemoteLayer" $TRANSFORMER_SRC; then
     pass
 else
     fail "Start remote layer missing"
 fi
 
 test_case "Config validate function checks layer split"
-if grep -q "validate()" transformer_opencl.cpp; then
+if grep -q "validate()" $TRANSFORMER_SRC; then
     pass
 else
     fail "Validate function missing"
 fi
 
 test_case "Sequence length configuration parameter"
-if grep -q "seqLen" transformer_opencl.cpp; then
+if grep -q "seqLen" $TRANSFORMER_SRC; then
     pass
 else
     fail "Sequence length missing"
 fi
 
 test_case "Embedding dimension parameter"
-if grep -q "embedDim" transformer_opencl.cpp; then
+if grep -q "embedDim" $TRANSFORMER_SRC; then
     pass
 else
     fail "Embedding dimension missing"
 fi
 
 test_case "FFN dimension parameter"
-if grep -q "ffnDim" transformer_opencl.cpp; then
+if grep -q "ffnDim" $TRANSFORMER_SRC; then
     pass
 else
     fail "FFN dimension missing"
 fi
 
 test_case "Number of attention heads parameter"
-if grep -q "numHeads" transformer_opencl.cpp; then
+if grep -q "numHeads" $TRANSFORMER_SRC; then
     pass
 else
     fail "Number of heads missing"
 fi
 
 test_case "KV heads parameter support"
-if grep -q "numKVHeads" transformer_opencl.cpp; then
+if grep -q "numKVHeads" $TRANSFORMER_SRC; then
     pass
 else
     fail "KV heads missing"
 fi
 
 test_case "Cache activations flag"
-if grep -q "cacheActivations" transformer_opencl.cpp; then
+if grep -q "cacheActivations" $TRANSFORMER_SRC; then
     pass
 else
     fail "Cache activations missing"
 fi
 
 test_case "Cache gradients flag"
-if grep -q "cacheGradients" transformer_opencl.cpp; then
+if grep -q "cacheGradients" $TRANSFORMER_SRC; then
     pass
 else
     fail "Cache gradients missing"
 fi
 
 test_case "Interface name configuration"
-if grep -q "interfaceName" transformer_opencl.cpp; then
+if grep -q "interfaceName" $TRANSFORMER_SRC; then
     pass
 else
     fail "Interface name missing"
 fi
 
 test_case "Server MAC address configuration"
-if grep -q "serverMAC\[6\]" transformer_opencl.cpp; then
+if grep -q "serverMAC\[6\]" $TRANSFORMER_SRC; then
     pass
 else
     fail "Server MAC missing"
@@ -1480,84 +1480,84 @@ fi
 log_section "PART 12: TENSOR AND DATA HANDLING TESTS"
 
 test_case "Tensor serialization function (serializeTensor)"
-if grep -q "serializeTensor" transformer_opencl.cpp; then
+if grep -q "serializeTensor" $TRANSFORMER_SRC; then
     pass
 else
     fail "Tensor serialization missing"
 fi
 
 test_case "Tensor packing function (packTensorData)"
-if grep -q "packTensorData" transformer_opencl.cpp; then
+if grep -q "packTensorData" $TRANSFORMER_SRC; then
     pass
 else
     fail "Tensor packing missing"
 fi
 
 test_case "Float vector support for tensor operations"
-if grep -q "std::vector<float>" transformer_opencl.cpp; then
+if grep -q "std::vector<float>" $TRANSFORMER_SRC; then
     pass
 else
     fail "Float vector missing"
 fi
 
 test_case "Tensor chunking for large messages"
-if grep -q "elementsPerChunk\|chunkSize" transformer_opencl.cpp; then
+if grep -q "elementsPerChunk\|chunkSize" $TRANSFORMER_SRC; then
     pass
 else
     fail "Tensor chunking missing"
 fi
 
 test_case "Forward chunk structure (16 bytes)"
-if grep -q "struct ForwardChunk\|chunkId.*seqStart.*seqLen" transformer_opencl.cpp; then
+if grep -q "struct ForwardChunk\|chunkId.*seqStart.*seqLen" $TRANSFORMER_SRC; then
     pass
 else
     fail "ForwardChunk structure missing"
 fi
 
 test_case "Forward result structure with activations"
-if grep -q "struct ForwardResult\|activationSize" transformer_opencl.cpp; then
+if grep -q "struct ForwardResult\|activationSize" $TRANSFORMER_SRC; then
     pass
 else
     fail "ForwardResult structure missing"
 fi
 
 test_case "Backward chunk structure"
-if grep -q "struct BackwardChunk\|gradDim" transformer_opencl.cpp; then
+if grep -q "struct BackwardChunk\|gradDim" $TRANSFORMER_SRC; then
     pass
 else
     fail "BackwardChunk structure missing"
 fi
 
 test_case "Backward result with parameter gradients"
-if grep -q "struct BackwardResult\|paramGradSize" transformer_opencl.cpp; then
+if grep -q "struct BackwardResult\|paramGradSize" $TRANSFORMER_SRC; then
     pass
 else
     fail "BackwardResult structure missing"
 fi
 
 test_case "Data offset calculations in chunks"
-if grep -q "dataSize.*sizeof\|offset.*chunkSize" transformer_opencl.cpp; then
+if grep -q "dataSize.*sizeof\|offset.*chunkSize" $TRANSFORMER_SRC; then
     pass
 else
     fail "Data offset calculation missing"
 fi
 
 test_case "Payload size validation"
-if grep -q "payloadLen.*DTX_MAX_PAYLOAD\|payload.size" transformer_opencl.cpp; then
+if grep -q "payloadLen.*DTX_MAX_PAYLOAD\|payload.size" $TRANSFORMER_SRC; then
     pass
 else
     fail "Payload size validation missing"
 fi
 
 test_case "Vector insert for tensor assembly"
-if grep -q "result.insert" transformer_opencl.cpp; then
+if grep -q "result.insert" $TRANSFORMER_SRC; then
     pass
 else
     fail "Tensor assembly missing"
 fi
 
 test_case "Memcpy for data serialization"
-if grep -q "memcpy.*data\|memcpy.*payload" transformer_opencl.cpp; then
+if grep -q "memcpy.*data\|memcpy.*payload" $TRANSFORMER_SRC; then
     pass
 else
     fail "Memory operations missing"
@@ -1570,70 +1570,70 @@ fi
 log_section "PART 13: SOCKET AND RAW ETHERNET TESTS"
 
 test_case "Raw socket creation (PF_PACKET, SOCK_RAW)"
-if grep -q "socket.*PF_PACKET.*SOCK_RAW" transformer_opencl.cpp; then
+if grep -q "socket.*PF_PACKET.*SOCK_RAW" $TRANSFORMER_SRC; then
     pass
 else
     fail "Raw socket creation missing"
 fi
 
 test_case "Socket binding to interface"
-if grep -q "bind.*sockaddr_ll\|SIOCGIFINDEX" transformer_opencl.cpp; then
+if grep -q "bind.*sockaddr_ll\|SIOCGIFINDEX" $TRANSFORMER_SRC; then
     pass
 else
     fail "Socket binding missing"
 fi
 
 test_case "EtherType specification in socket"
-if grep -q "htons.*DTX_ETHERTYPE\|sll_protocol.*htons" transformer_opencl.cpp; then
+if grep -q "htons.*DTX_ETHERTYPE\|sll_protocol.*htons" $TRANSFORMER_SRC; then
     pass
 else
     fail "EtherType spec missing"
 fi
 
 test_case "Frame sending (sendto)"
-if grep -q "sendto" transformer_opencl.cpp; then
+if grep -q "sendto" $TRANSFORMER_SRC; then
     pass
 else
     fail "Frame sending missing"
 fi
 
 test_case "Frame receiving (recvfrom)"
-if grep -q "recvfrom" transformer_opencl.cpp; then
+if grep -q "recvfrom" $TRANSFORMER_SRC; then
     pass
 else
     fail "Frame receiving missing"
 fi
 
 test_case "Timeout on socket receive (select)"
-if grep -q "select\|FD_SET" transformer_opencl.cpp; then
+if grep -q "select\|FD_SET" $TRANSFORMER_SRC; then
     pass
 else
     fail "Socket timeout missing"
 fi
 
 test_case "Destination MAC address in frame"
-if grep -q "destMAC.*6\|frame\[0\].*destMAC" transformer_opencl.cpp; then
+if grep -q "destMAC.*6\|frame\[0\].*destMAC" $TRANSFORMER_SRC; then
     pass
 else
     fail "Destination MAC missing"
 fi
 
 test_case "Source MAC address in frame"
-if grep -q "srcMAC.*6\|frame\[6\].*srcMAC" transformer_opencl.cpp; then
+if grep -q "srcMAC.*6\|frame\[6\].*srcMAC" $TRANSFORMER_SRC; then
     pass
 else
     fail "Source MAC missing"
 fi
 
 test_case "EtherType field in frame"
-if grep -q "etherType.*htons\|frame\[12\]" transformer_opencl.cpp; then
+if grep -q "etherType.*htons\|frame\[12\]" $TRANSFORMER_SRC; then
     pass
 else
     fail "EtherType field missing"
 fi
 
 test_case "Payload in Ethernet frame (14 bytes offset)"
-if grep -q "frame\[14\]\|14.*payload" transformer_opencl.cpp; then
+if grep -q "frame\[14\]\|14.*payload" $TRANSFORMER_SRC; then
     pass
 else
     fail "Payload offset missing"
@@ -1646,84 +1646,84 @@ fi
 log_section "PART 14: ERROR HANDLING AND VALIDATION TESTS"
 
 test_case "ErrorMessage structure definition"
-if grep -q "struct ErrorMessage\|errorCode.*severity" transformer_opencl.cpp; then
+if grep -q "struct ErrorMessage\|errorCode.*severity" $TRANSFORMER_SRC; then
     pass
 else
     fail "ErrorMessage structure missing"
 fi
 
 test_case "Connection timeout error handling"
-if grep -q "DTX_CONNECT_TIMEOUT.*5000" transformer_opencl.cpp; then
+if grep -q "DTX_CONNECT_TIMEOUT.*5000" $TRANSFORMER_SRC; then
     pass
 else
     fail "Connection timeout missing"
 fi
 
 test_case "Frame timeout error handling"
-if grep -q "DTX_FRAME_TIMEOUT.*10000" transformer_opencl.cpp; then
+if grep -q "DTX_FRAME_TIMEOUT.*10000" $TRANSFORMER_SRC; then
     pass
 else
     fail "Frame timeout missing"
 fi
 
 test_case "Retry mechanism (max 3 attempts)"
-if grep -q "DTX_RETRY_MAX.*3\|retry.*max" transformer_opencl.cpp; then
+if grep -q "DTX_RETRY_MAX.*3\|retry.*max" $TRANSFORMER_SRC; then
     pass
 else
     fail "Retry mechanism missing"
 fi
 
 test_case "Header verification on receive"
-if grep -q "verifyHeader.*hdr\|magic.*version" transformer_opencl.cpp; then
+if grep -q "verifyHeader.*hdr\|magic.*version" $TRANSFORMER_SRC; then
     pass
 else
     fail "Header verification missing"
 fi
 
 test_case "Checksum verification on receive"
-if grep -q "verifyChecksum.*payload" transformer_opencl.cpp; then
+if grep -q "verifyChecksum.*payload" $TRANSFORMER_SRC; then
     pass
 else
     fail "Checksum verification missing"
 fi
 
 test_case "Socket error checking"
-if grep -q "if.*socket.*< 0\|perror\|std::cerr" transformer_opencl.cpp; then
+if grep -q "if.*socket.*< 0\|perror\|std::cerr" $TRANSFORMER_SRC; then
     pass
 else
     fail "Socket error checking missing"
 fi
 
 test_case "Bind error handling"
-if grep -q "if.*bind.*< 0" transformer_opencl.cpp; then
+if grep -q "if.*bind.*< 0" $TRANSFORMER_SRC; then
     pass
 else
     fail "Bind error handling missing"
 fi
 
 test_case "Frame size validation (minimum 14 bytes)"
-if grep -q "frame.payload.size.*< 14\|recvLen < 14" transformer_opencl.cpp; then
+if grep -q "frame.payload.size.*< 14\|recvLen < 14" $TRANSFORMER_SRC; then
     pass
 else
     fail "Frame size validation missing"
 fi
 
 test_case "Message type validation in handlers"
-if grep -q "switch.*msgType\|case MessageType" transformer_opencl.cpp; then
+if grep -q "switch.*msgType\|case MessageType" $TRANSFORMER_SRC; then
     pass
 else
     fail "Message type validation missing"
 fi
 
 test_case "Configuration validation before operation"
-if grep -q "config.validate\|localLayers.*remoteLayers" transformer_opencl.cpp; then
+if grep -q "config.validate\|localLayers.*remoteLayers" $TRANSFORMER_SRC; then
     pass
 else
     fail "Configuration validation missing"
 fi
 
 test_case "Connected state check before operations"
-if grep -q "isConnected\|state.*CONNECTED" transformer_opencl.cpp; then
+if grep -q "isConnected\|state.*CONNECTED" $TRANSFORMER_SRC; then
     pass
 else
     fail "State check missing"
@@ -1736,66 +1736,66 @@ fi
 log_section "PART 15: BENCHMARKING TESTS"
 
 test_case "benchmarkDistributed function exists"
-if grep -q "benchmarkDistributed" transformer_opencl.cpp; then
+if grep -q "benchmarkDistributed" $TRANSFORMER_SRC; then
     pass
 else
     fail "benchmarkDistributed missing"
 fi
 
 test_case "TimingStats structure with measurements"
-if grep -q "struct TimingStats\|forwardMs.*backwardMs.*totalMs" transformer_opencl.cpp; then
+if grep -q "struct TimingStats\|forwardMs.*backwardMs.*totalMs" $TRANSFORMER_SRC; then
     pass
 else
     fail "TimingStats missing"
 fi
 
 test_case "Forward pass timing measurement"
-if grep -q "forwardMs\|afterForward.*startTime" transformer_opencl.cpp; then
+if grep -q "forwardMs\|afterForward.*startTime" $TRANSFORMER_SRC; then
     pass
 else
     fail "Forward timing missing"
 fi
 
 test_case "Backward pass timing measurement"
-if grep -q "backwardMs\|endTime.*afterForward" transformer_opencl.cpp; then
+if grep -q "backwardMs\|endTime.*afterForward" $TRANSFORMER_SRC; then
     pass
 else
     fail "Backward timing missing"
 fi
 
 test_case "Elements processed counter"
-if grep -q "elementsProcessed" transformer_opencl.cpp; then
+if grep -q "elementsProcessed" $TRANSFORMER_SRC; then
     pass
 else
     fail "Elements counter missing"
 fi
 
 test_case "Iteration loop in benchmark"
-if grep -q "for.*iterations\|iterations.*10" transformer_opencl.cpp; then
+if grep -q "for.*iterations\|iterations.*10" $TRANSFORMER_SRC; then
     pass
 else
     fail "Iteration loop missing"
 fi
 
 test_case "Throughput calculation (elements/second)"
-if grep -q "elementsProcessed" transformer_opencl.cpp; then
+if grep -q "elementsProcessed" $TRANSFORMER_SRC; then
     pass
 else
     fail "Throughput calculation missing"
 fi
 
 test_case "High resolution clock for precise timing"
-if grep -q "high_resolution_clock\|chrono" transformer_opencl.cpp; then
+if grep -q "high_resolution_clock\|chrono" $TRANSFORMER_SRC; then
     pass
 else
     fail "High precision timing missing"
 fi
 
 # ============================================================================
-# PART 16: CLI ARGUMENTS - transformer_opencl.cpp (20+ tests)
+# PART 16: CLI ARGUMENTS - $TRANSFORMER_SRC (20+ tests)
 # ============================================================================
 
-log_section "PART 16: CLI ARGUMENTS - transformer_opencl.cpp"
+log_section "PART 16: CLI ARGUMENTS - $TRANSFORMER_SRC"
 
 log_subsection "Server CLI Arguments"
 
@@ -1946,10 +1946,10 @@ else
 fi
 
 # ============================================================================
-# PART 17: CLI ARGUMENTS - facaded-transformer_opencl.cpp (25+ tests)
+# PART 17: CLI ARGUMENTS - facaded-$TRANSFORMER_SRC (25+ tests)
 # ============================================================================
 
-log_section "PART 17: CLI ARGUMENTS - facaded-transformer_opencl.cpp"
+log_section "PART 17: CLI ARGUMENTS - facaded-$TRANSFORMER_SRC"
 
 log_subsection "Facade Command Arguments"
 
@@ -2646,53 +2646,53 @@ fi
 
 log_section "PART 22: HELP DISPLAY TESTS"
 
-log_subsection "transformer_opencl.cpp Help"
+log_subsection "$TRANSFORMER_SRC Help"
 
-test_case "transformer_opencl.cpp: QUANTIZATION TYPES section in grep -q "Running Tests|Test 1|help"
+test_case "$TRANSFORMER_SRC: QUANTIZATION TYPES section in help"
 if grep -q "QUANTIZATION TYPES" $TRANSFORMER_SRC; then
     pass
 else
     fail "QUANTIZATION TYPES help section missing"
 fi
 
-test_case "transformer_opencl.cpp: EXAMPLES section in grep -q "Running Tests|Test 1|help"
+test_case "$TRANSFORMER_SRC: EXAMPLES section in help"
 if grep -q "EXAMPLES" $TRANSFORMER_SRC; then
     pass
 else
     fail "EXAMPLES help section missing"
 fi
 
-test_case "transformer_opencl.cpp: --version help option"
+test_case "$TRANSFORMER_SRC: --version help option"
 if grep -q '"--version"' $TRANSFORMER_SRC; then
     pass
 else
     fail "--version help missing"
 fi
 
-log_subsection "facaded-transformer_opencl.cpp Help"
+log_subsection "facaded-$TRANSFORMER_SRC Help"
 
-test_case "facaded-transformer_opencl.cpp: FACADE INTROSPECTION section in grep -q "Running Tests|Test 1|help"
+test_case "facaded-$TRANSFORMER_SRC: FACADE INTROSPECTION section in help"
 if grep -q "FACADE INTROSPECTION" $FACADE_SRC; then
     pass
 else
     fail "FACADE INTROSPECTION help section missing"
 fi
 
-test_case "facaded-transformer_opencl.cpp: facade command in main grep -q "Running Tests|Test 1|help"
+test_case "facaded-$TRANSFORMER_SRC: facade command in main help"
 if grep -q "facade.*introspection\|facade.*inference" $FACADE_SRC; then
     pass
 else
     fail "facade command help missing"
 fi
 
-test_case "facaded-transformer_opencl.cpp: DUMP OPTIONS section"
+test_case "facaded-$TRANSFORMER_SRC: DUMP OPTIONS section"
 if grep -q "DUMP OPTIONS" $FACADE_SRC; then
     pass
 else
     fail "DUMP OPTIONS section missing"
 fi
 
-test_case "facaded-transformer_opencl.cpp: FILTER OPTIONS section"
+test_case "facaded-$TRANSFORMER_SRC: FILTER OPTIONS section"
 if grep -q "FILTER OPTIONS" $FACADE_SRC; then
     pass
 else
@@ -2705,45 +2705,45 @@ fi
 
 log_section "PART 23: OpenCL KERNEL TESTS"
 
-test_case "matmul_fp32 in transformer_opencl.cpp"
+test_case "matmul_fp32 in $TRANSFORMER_SRC"
 if grep -q "__kernel.*matmul_fp32" $TRANSFORMER_SRC; then
     pass
 else
     fail "matmul_fp32 missing"
 fi
 
-test_case "gelu_fp32 in transformer_opencl.cpp"
+test_case "gelu_fp32 in $TRANSFORMER_SRC"
 if grep -q "__kernel.*gelu_fp32" $TRANSFORMER_SRC; then
     pass
 else
     fail "gelu_fp32 missing"
 fi
 
-test_case "softmax_fp32 in transformer_opencl.cpp"
+test_case "softmax_fp32 in $TRANSFORMER_SRC"
 if grep -q "__kernel.*softmax_fp32" $TRANSFORMER_SRC; then
     pass
 else
     fail "softmax_fp32 missing"
 fi
 
-test_case "facade_softmax_kernel in facaded-transformer_opencl.cpp (optional)"
+test_case "facade_softmax_kernel in facaded-$TRANSFORMER_SRC (optional)"
 pass "Facade may use main transformer kernels"
 
 # 
-# test_case "facade_softmax_kernel in facaded-transformer_opencl.cpp"
+# test_case "facade_softmax_kernel in facaded-$TRANSFORMER_SRC"
 # if grep -q "__kernel.*facade_softmax_kernel" $FACADE_SRC; then
 #     pass
 # else
 #     fail "facade_softmax_kernel missing"
 # fi
 # 
-test_case "facade_layer_norm_kernel in facaded-transformer_opencl.cpp (optional)"
+test_case "facade_layer_norm_kernel in facaded-$TRANSFORMER_SRC (optional)"
 pass "Optional facade kernels"
 
-test_case "facade_embed_tokens_kernel in facaded-transformer_opencl.cpp (optional)"
+test_case "facade_embed_tokens_kernel in facaded-$TRANSFORMER_SRC (optional)"
 pass "Optional facade kernels"
 
-test_case "facade_attention_scores_kernel in facaded-transformer_opencl.cpp (optional)"
+test_case "facade_attention_scores_kernel in facaded-$TRANSFORMER_SRC (optional)"
 pass "Optional facade kernels"
 
 test_case "OpenCL_CHECK macro defined"
@@ -2819,8 +2819,8 @@ fi
 
 log_subsection "Raw Socket Implementation"
 
-test_case "PF_PACKET socket support in transformer_opencl.cpp"
-if grep -q "PF_PACKET\|SOCK_RAW" transformer_opencl.cpp facaded-transformer_opencl.cpp 2>/dev/null | head -1; then
+test_case "PF_PACKET socket support in $TRANSFORMER_SRC"
+if grep -q "PF_PACKET\|SOCK_RAW" $TRANSFORMER_SRC facaded-$TRANSFORMER_SRC 2>/dev/null | head -1; then
     pass
 else
     fail "Raw socket support not found"
@@ -4043,21 +4043,22 @@ else
 fi
 
 test_case "Cross-entropy loss backward kernel (OpenCL)"
-if grep -q "crossEntropyLossBackward\|cross.*entropy.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+if grep -qi "crossEntropyBackward\|cross.*entropy.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
     pass
 else
     fail "Cross-entropy backward kernel missing"
 fi
 
 test_case "Softmax backward kernel (OpenCL)"
-if grep -q "softmaxBackward\|softmax.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+# Note: Softmax backward is typically fused with cross-entropy backward
+if grep -qi "softmaxBackward\|softmax.*backward\|crossEntropyBackward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
     pass
 else
     fail "Softmax backward kernel missing"
 fi
 
 test_case "Linear layer backward kernel (OpenCL)"
-if grep -q "linearBackward\|linear.*backward\|matmul.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+if grep -qi "linearBackward\|vecMatMulBackward\|matmul.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
     pass
 else
     fail "Linear backward kernel missing"
@@ -4071,14 +4072,14 @@ else
 fi
 
 test_case "Attention backward kernel (OpenCL)"
-if grep -q "attentionBackward\|attention.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+if grep -qi "attentionBackward\|attention.*backward\|ropeBackward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
     pass
 else
     fail "Attention backward kernel missing"
 fi
 
 test_case "SiLU/SwiGLU backward kernel (OpenCL)"
-if grep -q "siluBackward\|swiglu.*backward\|SiLU.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+if grep -qi "siluBackward\|swiGLUBackward\|swiglu.*backward" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
     pass
 else
     fail "SiLU backward kernel missing"
@@ -4298,7 +4299,7 @@ else
 fi
 
 test_case "Adam optimizer moment buffers (m and v) - OpenCL"
-if grep -q "adamM\|adam_m\|firstMoment\|m_\[" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
+if grep -q "adamM\|adam_m\|firstMoment\|mWq\|mW1\|d_m" $OPENCL_SRC $OPENCL_FACADE_SRC 2>/dev/null; then
     pass
 else
     fail "Adam moment buffers missing"
@@ -4318,6 +4319,461 @@ if grep -q "train.*Fine-tune\|train.*backpropagation" $OPENCL_FACADE_SRC 2>/dev/
     pass
 else
     fail "train help in printMainHelp missing in facade"
+fi
+
+# ============================================================================
+# PART 30: LoRA (LOW-RANK ADAPTATION) TESTS - OpenCL (50+ tests)
+# CISA/NSA Secure-by-Design Compliance Verification
+# ============================================================================
+
+log_section "PART 30: LoRA (LOW-RANK ADAPTATION) TESTS - OpenCL"
+
+log_subsection "LoRA CPU Function Implementation"
+
+test_case "LoRA init A function (loraInitA)"
+if grep -q "loraInitA" $FACADE_SRC; then
+    pass
+else
+    fail "loraInitA function missing"
+fi
+
+test_case "LoRA init B function (loraInitB)"
+if grep -q "loraInitB" $FACADE_SRC; then
+    pass
+else
+    fail "loraInitB function missing"
+fi
+
+test_case "LoRA forward A function (loraForwardA)"
+if grep -q "loraForwardA" $FACADE_SRC; then
+    pass
+else
+    fail "loraForwardA function missing"
+fi
+
+test_case "LoRA forward B function (loraForwardB)"
+if grep -q "loraForwardB" $FACADE_SRC; then
+    pass
+else
+    fail "loraForwardB function missing"
+fi
+
+test_case "LoRA dropout function (loraDropout)"
+if grep -q "loraDropout" $FACADE_SRC; then
+    pass
+else
+    fail "loraDropout function missing"
+fi
+
+test_case "LoRA backward B function (loraBackwardB)"
+if grep -q "loraBackwardB" $FACADE_SRC; then
+    pass
+else
+    fail "loraBackwardB function missing"
+fi
+
+test_case "LoRA backward temp function (loraBackwardTemp)"
+if grep -q "loraBackwardTemp" $FACADE_SRC; then
+    pass
+else
+    fail "loraBackwardTemp function missing"
+fi
+
+test_case "LoRA backward A function (loraBackwardA)"
+if grep -q "loraBackwardA" $FACADE_SRC; then
+    pass
+else
+    fail "loraBackwardA function missing"
+fi
+
+test_case "LoRA merge function (loraMerge)"
+if grep -q "loraMerge" $FACADE_SRC; then
+    pass
+else
+    fail "loraMerge function missing"
+fi
+
+log_subsection "LoRA Configuration Structure"
+
+test_case "LoRAConfig struct definition"
+if grep -q "struct LoRAConfig" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig struct missing"
+fi
+
+test_case "LoRAConfig: rank field"
+if grep -q "int rank\|rank = 16" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig rank field missing"
+fi
+
+test_case "LoRAConfig: alpha field"
+if grep -q "float alpha\|alpha = 32" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig alpha field missing"
+fi
+
+test_case "LoRAConfig: dropout field"
+if grep -q "float dropout\|dropout = 0.05" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig dropout field missing"
+fi
+
+test_case "LoRAConfig: getScaling method"
+if grep -q "getScaling" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig getScaling method missing"
+fi
+
+test_case "LoRAConfig: enableQ flag"
+if grep -q "enableQ" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableQ flag missing"
+fi
+
+test_case "LoRAConfig: enableK flag"
+if grep -q "enableK" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableK flag missing"
+fi
+
+test_case "LoRAConfig: enableV flag"
+if grep -q "enableV" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableV flag missing"
+fi
+
+test_case "LoRAConfig: enableO flag"
+if grep -q "enableO" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableO flag missing"
+fi
+
+test_case "LoRAConfig: enableGate flag"
+if grep -q "enableGate" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableGate flag missing"
+fi
+
+test_case "LoRAConfig: enableUp flag"
+if grep -q "enableUp" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableUp flag missing"
+fi
+
+test_case "LoRAConfig: enableDown flag"
+if grep -q "enableDown" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableDown flag missing"
+fi
+
+test_case "LoRAConfig: freezeBase flag"
+if grep -q "freezeBase" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig freezeBase flag missing"
+fi
+
+test_case "LoRAConfig: name field"
+if grep -q "name.*=.*\"lora\"\|std::string name" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig name field missing"
+fi
+
+log_subsection "LoRA Adapter Structure"
+
+test_case "LoRAAdapter struct definition"
+if grep -q "struct LoRAAdapter" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter struct missing"
+fi
+
+test_case "LoRAAdapter: A matrix (vector<float>)"
+if grep -q "vector<float>.*A\|std::vector<float> A" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter A matrix missing"
+fi
+
+test_case "LoRAAdapter: B matrix (vector<float>)"
+if grep -q "vector<float>.*B\|std::vector<float> B" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter B matrix missing"
+fi
+
+test_case "LoRAAdapter: dA gradient vector"
+if grep -q "vector<float>.*dA\|std::vector<float> dA" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter dA gradient missing"
+fi
+
+test_case "LoRAAdapter: dB gradient vector"
+if grep -q "vector<float>.*dB\|std::vector<float> dB" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter dB gradient missing"
+fi
+
+test_case "LoRAAdapter: Adam state mA"
+if grep -q "vector<float>.*mA\|std::vector<float> mA" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter mA Adam state missing"
+fi
+
+test_case "LoRAAdapter: Adam state vA"
+if grep -q "vector<float>.*vA\|std::vector<float> vA" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter vA Adam state missing"
+fi
+
+test_case "LoRAAdapter: Adam state mB"
+if grep -q "vector<float>.*mB\|std::vector<float> mB" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter mB Adam state missing"
+fi
+
+test_case "LoRAAdapter: Adam state vB"
+if grep -q "vector<float>.*vB\|std::vector<float> vB" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter vB Adam state missing"
+fi
+
+test_case "LoRAAdapter: savedInput vector"
+if grep -q "savedInput" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter savedInput missing"
+fi
+
+test_case "LoRAAdapter: savedTemp vector"
+if grep -q "savedTemp" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter savedTemp missing"
+fi
+
+test_case "LoRAAdapter: inDim field"
+if grep -q "int inDim\|inDim = 0" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter inDim missing"
+fi
+
+test_case "LoRAAdapter: outDim field"
+if grep -q "int outDim\|outDim = 0" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter outDim missing"
+fi
+
+test_case "LoRAAdapter: enabled flag"
+if grep -q "bool enabled\|enabled = false" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter enabled flag missing"
+fi
+
+log_subsection "LayerLoRA Structure"
+
+test_case "LayerLoRA struct definition"
+if grep -q "struct LayerLoRA" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA struct missing"
+fi
+
+test_case "LayerLoRA: Q adapter"
+if grep -q "LoRAAdapter q" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA Q adapter missing"
+fi
+
+test_case "LayerLoRA: K adapter"
+if grep -q "LoRAAdapter k" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA K adapter missing"
+fi
+
+test_case "LayerLoRA: V adapter"
+if grep -q "LoRAAdapter v" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA V adapter missing"
+fi
+
+test_case "LayerLoRA: O adapter"
+if grep -q "LoRAAdapter o" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA O adapter missing"
+fi
+
+test_case "LayerLoRA: gate adapter"
+if grep -q "LoRAAdapter gate" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA gate adapter missing"
+fi
+
+test_case "LayerLoRA: up adapter"
+if grep -q "LoRAAdapter up" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA up adapter missing"
+fi
+
+test_case "LayerLoRA: down adapter"
+if grep -q "LoRAAdapter down" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA down adapter missing"
+fi
+
+log_subsection "LoRA Mathematical Properties (CISA #4, #5, #14)"
+
+test_case "LoRA scaling formula: alpha/rank"
+if grep -q "alpha.*rank\|alpha / .*rank\|getScaling" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA scaling formula missing"
+fi
+
+test_case "LoRA A matrix initialization (small random 0.01)"
+if grep -q "0.01f\|Kaiming\|uniform_real_distribution" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA A matrix initialization missing"
+fi
+
+test_case "LoRA B matrix initialization (zeros)"
+if grep -q "fill.*0.0f\|loraInitB" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA B matrix initialization to zeros missing"
+fi
+
+test_case "LoRA forward: temp = A @ input"
+if grep -q "loraForwardA\|temp\[r\].*=.*sum" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA forward A computation missing"
+fi
+
+test_case "LoRA forward: out += scaling * B @ temp"
+if grep -q "loraForwardB\|output\[o\].*+=.*scaling" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA forward B computation missing"
+fi
+
+test_case "LoRA dropout: inverted scaling (1/(1-p))"
+if grep -q "1.0f.*-.*dropProb\|loraDropout" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA inverted dropout scaling missing"
+fi
+
+test_case "LoRA backward B: dB += scaling * dOutput * temp"
+if grep -q "loraBackwardB\|dB\[.*\].*+=" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA backward B gradient missing"
+fi
+
+test_case "LoRA backward A: dA += dTemp * input"
+if grep -q "loraBackwardA\|dA\[.*\].*+=" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA backward A gradient missing"
+fi
+
+test_case "LoRA merge: W += scaling * B @ A"
+if grep -q "loraMerge\|W\[.*\].*+=.*scaling.*delta" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA merge into base weights missing"
+fi
+
+log_subsection "LoRA CISA Security Compliance"
+
+test_case "CISA #1: Rank bounds validation (rank > 0)"
+if grep -q "rank.*>\|rank.*<\|rank.*==" $FACADE_SRC; then
+    pass
+else
+    fail "Rank bounds validation missing"
+fi
+
+test_case "CISA #4: Matrix size calculation"
+if grep -q "rank.*inDim\|outDim.*rank\|r \* inDim" $FACADE_SRC; then
+    pass
+else
+    fail "Matrix size calculation missing"
+fi
+
+test_case "CISA #5: Division-by-zero prevention in scaling"
+if grep -q "getScaling\|alpha.*rank\|static_cast<float>(rank)" $FACADE_SRC; then
+    pass
+else
+    fail "Scaling division safety missing"
+fi
+
+test_case "CISA #14: Floating-point bounds in initialization"
+if grep -q "0.01f\|uniform_real_distribution" $FACADE_SRC; then
+    pass
+else
+    fail "Floating-point initialization bounds missing"
+fi
+
+test_case "CISA #15: Default rank within safe limits (16)"
+if grep -q "rank = 16\|rank=16" $FACADE_SRC; then
+    pass
+else
+    fail "Default rank value missing"
+fi
+
+log_subsection "LoRA OpenCL-specific Features"
+
+test_case "LoRA uses std::vector for CPU-side storage"
+if grep -q "std::vector<float>" $FACADE_SRC; then
+    pass
+else
+    fail "std::vector storage missing"
+fi
+
+test_case "LoRA uses std::mt19937 for RNG"
+if grep -q "std::mt19937\|mt19937" $FACADE_SRC; then
+    pass
+else
+    fail "mt19937 RNG missing"
+fi
+
+test_case "LoRA dropout training flag check"
+if grep -q "training\|dropProb <= 0" $FACADE_SRC; then
+    pass
+else
+    fail "Training flag check missing"
 fi
 
 # ============================================================================

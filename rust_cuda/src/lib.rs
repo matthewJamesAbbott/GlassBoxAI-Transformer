@@ -8,6 +8,7 @@ pub mod generator;
 pub mod protocol;
 pub mod network;
 pub mod trainer;
+pub mod lora;
 
 pub use error::TransformerError;
 pub use gguf::GGUFLoader;
@@ -26,4 +27,7 @@ pub use network::{
 pub use trainer::{
     GpuTrainer, TrainingConfig, LayerGradients, LayerAdamState,
     ForwardActivations, LayerWeightsRef, LayerWeightsMut,
+};
+pub use lora::{
+    LoRAConfig, LoRAAdapter, LayerLoRA, LoRATrainer,
 };

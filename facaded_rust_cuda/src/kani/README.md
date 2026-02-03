@@ -2,7 +2,7 @@
 
 ## CISA Secure-by-Design Hardening Proofs
 
-This directory contains **124 formal verification harnesses** using the [Kani Rust Verifier](https://model-checking.github.io/kani/) to prove security properties required for CISA compliance.
+This directory contains **196 formal verification harnesses** using the [Kani Rust Verifier](https://model-checking.github.io/kani/) to prove security properties required for CISA/NSA compliance.
 
 **Verification Status**: All harnesses pass verification successfully.
 
@@ -159,6 +159,82 @@ Key proofs:
 - `verify_attention_weight_dims` - Weight dimension calculations
 - `verify_ffn_weight_dims` - FFN weight size safety
 - `verify_total_params_calculation` - Parameter count overflow prevention
+
+### `lora.rs`
+Verifies LoRA (Low-Rank Adaptation) parameter-efficient fine-tuning safety including adapter arithmetic, memory bounds, serialization, and **validation functions** that enforce CISA requirements at runtime.
+
+**Configuration Validation Proofs (NEW):**
+- `verify_validate_rejects_zero_rank` - Division-by-zero prevention (CISA #5)
+- `verify_validate_rejects_excessive_rank` - Resource limit enforcement (CISA #15)
+- `verify_validate_rejects_invalid_alpha` - Floating-point sanity (CISA #14)
+- `verify_validate_rejects_invalid_dropout` - Division-by-zero prevention (CISA #5)
+- `verify_valid_config_passes` - No-panic for valid configs (CISA #3)
+
+**Safe Scaling Proofs (NEW):**
+- `verify_try_scaling_rank_zero` - try_scaling() returns None for rank=0
+- `verify_try_scaling_finite_result` - Scaling is finite for valid inputs
+
+**Constructor Validation Proofs (NEW):**
+- `verify_try_new_rejects_zero_heads` - Division-by-zero prevention (CISA #5)
+- `verify_try_new_rejects_indivisible_dim` - Dimension validation
+- `verify_head_dim_calculation_safe` - Safe division (CISA #4)
+- `verify_kv_dim_no_overflow` - Integer overflow prevention (CISA #4)
+
+**Memory Budget Proofs (NEW):**
+- `verify_adapter_memory_checked` - Checked arithmetic in memory calc
+- `verify_safe_add_params_no_overflow` - Safe parameter accumulation
+- `verify_memory_budget_enforcement` - 1GB budget enforced (CISA #15)
+- `verify_layer_budget_accumulation` - Layer accumulation safety
+
+**File Parsing Security Proofs (NEW):**
+- `verify_load_rejects_negative_rank` - Input validation (CISA #1)
+- `verify_load_rejects_excessive_file_rank` - DoS prevention (CISA #15)
+- `verify_load_rejects_excessive_name_len` - Name length limit (CISA #15)
+- `verify_load_version_bounds` - Version validation (CISA #1)
+- `verify_load_dimension_bounds` - Dimension DoS prevention (CISA #15)
+
+**Cleanup & State Proofs (NEW):**
+- `verify_cleanup_safe_state` - State reset verification (CISA #10)
+- `verify_cleanup_idempotent` - Idempotency guarantee (CISA #10)
+- `verify_adam_timestep_increment_safe` - Timestep overflow prevention
+- `verify_dropout_seed_valid` - Seed validity
+
+**Floating-Point Safety Proofs (NEW):**
+- `verify_inverted_dropout_scale_safe` - Dropout scale bounds
+- `verify_a_init_uniform_bounds` - Initialization bounds
+- `verify_full_forward_chain_finite` - Forward pass finiteness
+- `verify_gradient_clipping_safe` - Gradient clipping safety
+- `verify_backward_pass_safe` - Backward pass finiteness
+
+**Original Proofs:**
+- `verify_lora_rank_bounds` - LoRA rank configuration validation
+- `verify_lora_alpha_bounds` - LoRA alpha scaling factor safety
+- `verify_lora_scaling_factor` - alpha/rank division safety
+- `verify_lora_dropout_bounds` - Dropout rate in [0, 1)
+- `verify_lora_a_matrix_size` - A matrix (rank × in_dim) sizing
+- `verify_lora_b_matrix_size` - B matrix (out_dim × rank) sizing
+- `verify_lora_adapter_total_params` - Per-adapter parameter count
+- `verify_lora_layer_total_params` - Per-layer LoRA budget
+- `verify_lora_forward_a_safe` - Forward A @ input computation
+- `verify_lora_forward_b_safe` - Forward scaling * B @ temp
+- `verify_lora_dropout_scaling` - Inverted dropout scaling
+- `verify_lora_backward_b_safe` - Gradient w.r.t. B computation
+- `verify_lora_backward_temp_safe` - Gradient w.r.t. temp
+- `verify_lora_backward_a_safe` - Gradient w.r.t. A computation
+- `verify_lora_adam_update_safe` - LoRA-specific Adam optimizer
+- `verify_lora_merge_element_safe` - Merge into base weights
+- `verify_lora_ba_product_safe` - B @ A matrix product
+- `verify_lora_file_header_bounds` - Serialization header validation
+- `verify_lora_flags_exhaustive` - Adapter enable flags
+- `verify_lora_name_length_bounds` - Name field length
+- `verify_lora_memory_budget` - Total LoRA memory footprint
+- `verify_lora_temp_buffer_size` - Temp buffer allocation
+- `verify_lora_layers_parsing` - Layer configuration parsing
+- `verify_freeze_base_independence` - Base freeze flag
+- `verify_lora_a_init_bounds` - A matrix initialization
+- `verify_lora_b_init_zero` - B matrix zero initialization
+- `verify_layer_lora_access_bounds` - Layer index bounds
+- `verify_adapter_element_access` - Adapter element indexing
 
 ## Security Budget Constants
 

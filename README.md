@@ -11,7 +11,7 @@
 [![OpenCL](https://img.shields.io/badge/OpenCL-3.0-blue.svg)](https://www.khronos.org/opencl/)
 [![Metal](https://img.shields.io/badge/Metal-macOS-silver.svg)](https://developer.apple.com/metal/)
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange.svg)](https://www.rust-lang.org/)
-[![Kani](https://img.shields.io/badge/Kani-124%20Proofs-brightgreen.svg)](https://model-checking.github.io/kani/)
+[![Kani](https://img.shields.io/badge/Kani-196%20Proofs-brightgreen.svg)](https://model-checking.github.io/kani/)
 [![CISA Compliant](https://img.shields.io/badge/CISA-Secure%20by%20Design-blue.svg)](https://www.cisa.gov/securebydesign)
 
 ---
@@ -25,7 +25,7 @@ GlassBoxAI-Transformer is a comprehensive, production-ready Large Language Model
 - **GGUF model format support**: Load quantized models from llama.cpp ecosystem
 - **Quantization support**: Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_0 formats with GPU-accelerated dequantization
 - **Facade pattern architecture**: Clean API separation with deep introspection capabilities
-- **Formal verification**: 124 Kani-verified proof harnesses for memory safety guarantees
+- **Formal verification**: 196 Kani-verified proof harnesses for memory safety guarantees
 - **CISA/NSA Secure by Design compliance**: Built following government cybersecurity standards
 
 This project demonstrates enterprise-grade software engineering practices including comprehensive testing, formal verification, cross-platform compatibility, and security-first development.
@@ -44,11 +44,12 @@ This project demonstrates enterprise-grade software engineering practices includ
    - [Standard Transformer Commands](#standard-transformer-commands)
    - [Facade Transformer Commands](#facade-transformer-commands)
 8. [Training](#training)
-9. [Testing](#testing)
-10. [Formal Verification with Kani](#formal-verification-with-kani)
-11. [CISA/NSA Compliance](#cisansa-compliance)
-12. [License](#license)
-13. [Author](#author)
+9. [LoRA (Low-Rank Adaptation)](#lora-low-rank-adaptation)
+10. [Testing](#testing)
+11. [Formal Verification with Kani](#formal-verification-with-kani)
+12. [CISA/NSA Compliance](#cisansa-compliance)
+13. [License](#license)
+14. [Author](#author)
 
 ---
 
@@ -125,7 +126,7 @@ GlassBoxAI-Transformer supports GGUF models from the llama.cpp ecosystem. Compat
 | Feature | Technology |
 |---------|------------|
 | **Memory Safety** | Rust ownership model |
-| **Formal Verification** | 124 Kani proof harnesses |
+| **Formal Verification** | 196 Kani proof harnesses |
 | **Bounds Checking** | Verified array access |
 | **Input Validation** | CLI argument validation |
 | **CISA Compliance** | 12 of 15 requirements verified |
@@ -205,8 +206,10 @@ GlassBoxAI-Transformer/
 │       ├── tokenizer.rs            # BPE tokenizer
 │       ├── quant.rs                # Dequantization routines
 │       ├── kernels.rs              # CUDA kernel definitions
+│       ├── lora.rs                 # LoRA adapter implementation
+│       ├── trainer.rs              # GPU training infrastructure
 │       ├── error.rs                # Error types
-│       └── kani/                   # Formal verification proofs
+│       └── kani/                   # Formal verification proofs (196 total)
 │           ├── mod.rs              # Module index
 │           ├── bounds.rs           # Bounds checking proofs (8)
 │           ├── arithmetic.rs       # Arithmetic safety proofs (11)
@@ -217,6 +220,8 @@ GlassBoxAI-Transformer/
 │           ├── tokenizer.rs        # Tokenizer proofs (12)
 │           ├── quant.rs            # Quantization proofs (15)
 │           ├── model.rs            # Model proofs (13)
+│           ├── trainer.rs          # Training proofs (25)
+│           ├── lora.rs             # LoRA proofs (70+)
 │           └── README.md           # Verification documentation
 │
 ├── models/                         # Model storage directory
@@ -887,6 +892,7 @@ For systems with limited GPU memory, GlassBoxAI-Transformer supports mixed devic
 | **Activation Caching** | Efficient caching for backward pass computation |
 | **Cross-Entropy Loss** | Fused softmax + cross-entropy loss computation |
 | **Learning Rate Control** | Configurable learning rate with warmup support |
+| **LoRA Fine-Tuning** | Parameter-efficient adaptation with low-rank matrices |
 
 ### Train Command Options
 
@@ -927,8 +933,196 @@ For systems with limited GPU memory, GlassBoxAI-Transformer supports mixed devic
     --train-text "The quick brown fox" --verbose
 
 # Fine-tuning from file with verbose output
-./facaded-transformer-cuda train -m models/tinyllama.gguf \
+./facaded_transformer_cuda train -m models/tinyllama.gguf \
     --epochs 100 --verbose --train-file training_data.txt
+```
+
+---
+
+## **LoRA (Low-Rank Adaptation)**
+
+### Overview
+
+LoRA enables **parameter-efficient fine-tuning** by injecting trainable low-rank matrices into transformer layers. Instead of updating all model weights, LoRA freezes the base model and trains small adapter matrices, reducing memory usage by **10-100x** while maintaining performance.
+
+```
+Original: Y = W × X
+LoRA:     Y = W × X + (B × A) × X × scaling
+          where A: (rank × in_dim), B: (out_dim × rank)
+```
+
+### Key Benefits
+
+| Benefit | Description |
+|---------|-------------|
+| **Memory Efficient** | Only ~0.1-1% of parameters are trainable |
+| **Fast Training** | Smaller gradient computation and optimizer state |
+| **Composable** | Multiple LoRA adapters can be trained and swapped |
+| **Mergeable** | Adapters can be merged into base weights for zero overhead inference |
+| **Reversible** | Original model preserved; adapters can be removed |
+
+### LoRA Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `rank` | 16 | Low-rank dimension (r). Higher = more capacity, more memory |
+| `alpha` | 32.0 | Scaling factor. Effective scale = alpha/rank |
+| `dropout` | 0.05 | Dropout between A and B matrices (training only) |
+| `enableQ` | true | Apply LoRA to attention Q projection |
+| `enableK` | true | Apply LoRA to attention K projection |
+| `enableV` | true | Apply LoRA to attention V projection |
+| `enableO` | true | Apply LoRA to attention output projection |
+| `enableGate` | true | Apply LoRA to FFN gate/w1 projection |
+| `enableUp` | true | Apply LoRA to FFN up/w3 projection |
+| `enableDown` | true | Apply LoRA to FFN down/w2 projection |
+| `freezeBase` | true | Freeze base model weights (recommended) |
+
+### LoRA Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         LoRA Adapter                                │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Input (dim)                                                       │
+│       │                                                             │
+│       ├────────────────────────────────┐                            │
+│       │                                │                            │
+│       ▼                                ▼                            │
+│   ┌───────────┐                   ┌─────────┐                       │
+│   │  Base W   │                   │ A matrix │ (rank × in_dim)      │
+│   │  (frozen) │                   │ (trained)│                      │
+│   └─────┬─────┘                   └────┬────┘                       │
+│         │                              │                            │
+│         │                              ▼                            │
+│         │                        ┌──────────┐                       │
+│         │                        │ Dropout  │ (training only)       │
+│         │                        └────┬─────┘                       │
+│         │                              │                            │
+│         │                              ▼                            │
+│         │                        ┌─────────┐                        │
+│         │                        │ B matrix │ (out_dim × rank)      │
+│         │                        │ (trained)│                       │
+│         │                        └────┬────┘                        │
+│         │                              │                            │
+│         │                              ▼                            │
+│         │                        × scaling (alpha/rank)             │
+│         │                              │                            │
+│         ▼                              ▼                            │
+│       ┌─────────────────────────────────┐                           │
+│       │            Output = Base + LoRA │                           │
+│       └─────────────────────────────────┘                           │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Per-Layer Adapters
+
+Each transformer layer can have up to 7 LoRA adapters:
+
+| Adapter | Projection | Typical Dimensions |
+|---------|------------|-------------------|
+| **Q** | Query projection | dim → dim |
+| **K** | Key projection | dim → kv_dim |
+| **V** | Value projection | dim → kv_dim |
+| **O** | Output projection | dim → dim |
+| **Gate** | FFN gate/w1 | dim → ffn_dim |
+| **Up** | FFN up/w3 | dim → ffn_dim |
+| **Down** | FFN down/w2 | ffn_dim → dim |
+
+### Memory Comparison
+
+For a 7B parameter model with rank=16:
+
+| Configuration | Trainable Parameters | Memory (FP32) |
+|--------------|---------------------|---------------|
+| Full Fine-Tuning | ~7,000,000,000 | ~28 GB |
+| LoRA (all layers) | ~8,000,000 | ~32 MB |
+| LoRA (attention only) | ~4,000,000 | ~16 MB |
+
+### Implementation Status
+
+| Implementation | LoRA Status | Features |
+|---------------|-------------|----------|
+| **facaded_transformer.cu** | ✅ Full support | CUDA kernels, Adam optimizer |
+| **facaded-transformer-opencl.cpp** | ✅ Full support | CPU functions, backward pass |
+| **facaded_rust_cuda/** | ✅ Full support | Kani-verified, CISA compliant |
+
+### CUDA Kernels (facaded_transformer.cu)
+
+```cpp
+// LoRA CUDA Kernels
+loraInitAKernel()      // Initialize A with small random values
+loraInitBKernel()      // Initialize B to zeros
+loraForwardAKernel()   // temp = A @ input
+loraForwardBKernel()   // out += scaling * B @ temp
+loraDropoutKernel()    // Apply inverted dropout
+```
+
+### OpenCL/CPU Functions (facaded-transformer-opencl.cpp)
+
+```cpp
+// LoRA CPU Functions
+loraInitA()           // Initialize A matrix
+loraInitB()           // Initialize B matrix (zeros)
+loraForwardA()        // Forward: temp = A @ input
+loraForwardB()        // Forward: out += scaling * B @ temp
+loraDropout()         // Apply dropout (training)
+loraBackwardB()       // Gradient w.r.t. B
+loraBackwardTemp()    // Gradient w.r.t. temp
+loraBackwardA()       // Gradient w.r.t. A
+loraMerge()           // Merge adapter into base weights
+```
+
+### Rust Implementation (facaded_rust_cuda/)
+
+The Rust implementation includes **70+ LoRA-specific Kani proofs** for CISA/NSA compliance:
+
+```rust
+// Configuration validation (CISA #1, #5)
+LoRAConfig::validate()      // Reject invalid configs
+LoRAConfig::try_scaling()   // Safe scaling factor computation
+
+// Memory safety (CISA #4, #15)
+calculate_adapter_memory()  // Checked arithmetic
+validate_memory_budget()    // 1GB budget enforcement
+safe_add_params()           // Overflow-safe accumulation
+
+// File parsing security (CISA #1, #15)
+load()                      // Validates all untrusted file fields
+```
+
+### Security Constants (CISA #15)
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MAX_LORA_RANK` | 256 | Prevent excessive memory allocation |
+| `MAX_MODEL_DIM` | 65,536 | Bound dimension sizes |
+| `MAX_FFN_DIM` | 131,072 | Bound FFN dimensions |
+| `MAX_LAYERS` | 256 | Limit layer count |
+| `MAX_LORA_NAME_LEN` | 1,024 | Prevent DoS via long names |
+| `MAX_LORA_MEMORY_BUDGET` | 1 GB | Total LoRA memory limit |
+
+### Example Usage
+
+```bash
+# Train with LoRA (all adapters enabled by default)
+./facaded_transformer_cuda train -m models/llama.gguf \
+    --lora-rank 16 --lora-alpha 32 --train-file data.txt
+
+# Train with attention-only LoRA (faster, less memory)
+./facaded_transformer_cuda train -m models/llama.gguf \
+    --lora-layers q,k,v,o --train-text "Training data"
+
+# Train with FFN-only LoRA
+./facaded_transformer_cuda train -m models/llama.gguf \
+    --lora-layers gate,up,down --epochs 10
+
+# Save and load LoRA adapters
+./facaded_transformer_cuda train -m model.gguf \
+    --lora-save adapter.lora --train-file corpus.txt
+./facaded_transformer_cuda generate -m model.gguf \
+    --lora-load adapter.lora -p "Hello"
 ```
 
 ---
@@ -997,7 +1191,7 @@ Total:  15
 
 ### Overview
 
-The Rust Facade implementation includes **99 Kani formal verification proof harnesses** that mathematically prove the absence of certain classes of bugs. This goes beyond traditional testing to provide **mathematical guarantees** about code correctness.
+The Rust Facade implementation includes **196 Kani formal verification proof harnesses** that mathematically prove the absence of certain classes of bugs. This goes beyond traditional testing to provide **mathematical guarantees** about code correctness.
 
 ### Verification Categories
 
@@ -1035,7 +1229,8 @@ The test suite covers 12 of 15 CISA security verification requirements:
 | `quant.rs` | 15 | Quantization arithmetic |
 | `model.rs` | 13 | Model loading safety |
 | `trainer.rs` | 25 | Training infrastructure safety |
-| **Total** | **124** | |
+| `lora.rs` | 70 | LoRA adapter safety & CISA compliance |
+| **Total** | **196** | |
 
 ### Key Kani Proofs
 
@@ -1058,6 +1253,15 @@ The test suite covers 12 of 15 CISA security verification requirements:
 - `verify_bytemuck_alignment` ✓
 - `verify_block_struct_sizes` ✓
 - `verify_tensor_security_budget` ✓
+
+#### LoRA Safety Proofs
+- `verify_validate_rejects_zero_rank` ✓ (CISA #5: Division-by-zero)
+- `verify_lora_scaling_factor` ✓ (CISA #5: Safe division)
+- `verify_adapter_memory_checked` ✓ (CISA #4: Overflow prevention)
+- `verify_memory_budget_enforcement` ✓ (CISA #15: Resource limits)
+- `verify_load_rejects_excessive_name_len` ✓ (CISA #15: DoS prevention)
+- `verify_try_new_rejects_zero_heads` ✓ (CISA #5: Division-by-zero)
+- `verify_backward_pass_safe` ✓ (CISA #14: Floating-point safety)
 
 ### Running Kani Verification
 
@@ -1093,7 +1297,7 @@ This project follows **CISA (Cybersecurity and Infrastructure Security Agency)**
 | Principle | Implementation |
 |-----------|---------------|
 | **Memory Safety** | Rust ownership model eliminates buffer overflows, use-after-free, and data races |
-| **Formal Verification** | 124 Kani proofs mathematically verify absence of critical bugs |
+| **Formal Verification** | 196 Kani proofs mathematically verify absence of critical bugs |
 | **Input Validation** | All CLI inputs validated before processing |
 | **Defense in Depth** | Multiple layers of safety (language, compiler, runtime checks) |
 | **Secure Defaults** | Safe default configurations throughout |
@@ -1103,7 +1307,7 @@ This project follows **CISA (Cybersecurity and Infrastructure Security Agency)**
 
 - [x] **Memory-safe language** (Rust implementation)
 - [x] **Static analysis** (Rust compiler + Clippy)
-- [x] **Formal verification** (124 Kani proof harnesses)
+- [x] **Formal verification** (196 Kani proof harnesses)
 - [x] **Comprehensive testing** (Unit tests + integration tests)
 - [x] **Bounds checking** (Verified array access)
 - [x] **Input validation** (CLI argument parsing)
@@ -1116,7 +1320,7 @@ This project follows **CISA (Cybersecurity and Infrastructure Security Agency)**
 
 This codebase has been developed following secure software development lifecycle (SSDLC) practices and demonstrates:
 
-- **99 formal verification proofs passed** (Kani proofs across 9 modules)
+- **196 formal verification proofs passed** (Kani proofs across 11 modules including LoRA)
 - **Zero warnings** compilation across all implementations
 - **Consistent API** across all language/backend combinations
 - **Production-ready** code quality

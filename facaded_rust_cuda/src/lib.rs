@@ -6,6 +6,7 @@ pub mod model;
 pub mod kernels;
 pub mod facade;
 pub mod trainer;
+pub mod lora;
 
 #[cfg(kani)]
 pub mod kani;
@@ -21,4 +22,7 @@ pub use facade::{
 pub use trainer::{
     GpuTrainer, TrainingConfig, LayerGradients, LayerAdamState,
     ForwardActivations, LayerWeightsRef, LayerWeightsMut,
+};
+pub use lora::{
+    LoRAConfig, LoRAAdapter, LayerLoRA, LoRATrainer,
 };

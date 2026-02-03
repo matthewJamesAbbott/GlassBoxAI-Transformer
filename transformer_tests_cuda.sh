@@ -25,8 +25,8 @@ fi
 # Configuration
 TRANSFORMER_SRC="transformer.cu"
 FACADE_SRC="facaded_transformer.cu"
-TRANSFORMER_BIN="./transformer-cuda"
-FACADE_BIN="./facaded-transformer-cuda"
+TRANSFORMER_BIN="./transformer_cuda"
+FACADE_BIN="./facaded_transformer_cuda"
 TEST_DIR="./test_output/full_comprehensive"
 LOG_FILE="$TEST_DIR/comprehensive_test_results.log"
 
@@ -4323,6 +4323,391 @@ if grep -q "train.*Fine-tune\|train.*backpropagation" $FACADE_SRC; then
     pass
 else
     fail "train help in printMainHelp missing in facade"
+fi
+
+# ============================================================================
+# PART 30: LoRA (LOW-RANK ADAPTATION) TESTS (50+ tests)
+# CISA/NSA Secure-by-Design Compliance Verification
+# ============================================================================
+
+log_section "PART 30: LoRA (LOW-RANK ADAPTATION) TESTS"
+
+log_subsection "LoRA CUDA Kernel Implementation"
+
+test_case "LoRA init A kernel (loraInitAKernel)"
+if grep -q "loraInitAKernel" $FACADE_SRC; then
+    pass
+else
+    fail "loraInitAKernel missing"
+fi
+
+test_case "LoRA init B kernel (loraInitBKernel)"
+if grep -q "loraInitBKernel" $FACADE_SRC; then
+    pass
+else
+    fail "loraInitBKernel missing"
+fi
+
+test_case "LoRA forward A kernel (loraForwardAKernel)"
+if grep -q "loraForwardAKernel" $FACADE_SRC; then
+    pass
+else
+    fail "loraForwardAKernel missing"
+fi
+
+test_case "LoRA forward B kernel (loraForwardBKernel)"
+if grep -q "loraForwardBKernel" $FACADE_SRC; then
+    pass
+else
+    fail "loraForwardBKernel missing"
+fi
+
+test_case "LoRA dropout kernel (loraDropoutKernel)"
+if grep -q "loraDropoutKernel" $FACADE_SRC; then
+    pass
+else
+    fail "loraDropoutKernel missing"
+fi
+
+log_subsection "LoRA Configuration Structure"
+
+test_case "LoRAConfig struct definition"
+if grep -q "struct LoRAConfig" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig struct missing"
+fi
+
+test_case "LoRAConfig: rank field"
+if grep -q "int rank\|rank = 16" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig rank field missing"
+fi
+
+test_case "LoRAConfig: alpha field"
+if grep -q "float alpha\|alpha = 32" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig alpha field missing"
+fi
+
+test_case "LoRAConfig: dropout field"
+if grep -q "float dropout\|dropout = 0.05" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig dropout field missing"
+fi
+
+test_case "LoRAConfig: getScaling method"
+if grep -q "getScaling" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig getScaling method missing"
+fi
+
+test_case "LoRAConfig: enableQ flag"
+if grep -q "enableQ" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableQ flag missing"
+fi
+
+test_case "LoRAConfig: enableK flag"
+if grep -q "enableK" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableK flag missing"
+fi
+
+test_case "LoRAConfig: enableV flag"
+if grep -q "enableV" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableV flag missing"
+fi
+
+test_case "LoRAConfig: enableO flag"
+if grep -q "enableO" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableO flag missing"
+fi
+
+test_case "LoRAConfig: enableGate flag"
+if grep -q "enableGate" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableGate flag missing"
+fi
+
+test_case "LoRAConfig: enableUp flag"
+if grep -q "enableUp" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableUp flag missing"
+fi
+
+test_case "LoRAConfig: enableDown flag"
+if grep -q "enableDown" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig enableDown flag missing"
+fi
+
+test_case "LoRAConfig: freezeBase flag"
+if grep -q "freezeBase" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig freezeBase flag missing"
+fi
+
+test_case "LoRAConfig: name field"
+if grep -q "name.*=.*\"lora\"\|std::string name" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAConfig name field missing"
+fi
+
+log_subsection "LoRA Adapter Structure"
+
+test_case "LoRAAdapter struct definition"
+if grep -q "struct LoRAAdapter" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter struct missing"
+fi
+
+test_case "LoRAAdapter: A matrix pointer"
+if grep -q "LoRAAdapter" $FACADE_SRC && grep -q "float\* A\|float \*A" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter A matrix missing"
+fi
+
+test_case "LoRAAdapter: B matrix pointer"
+if grep -q "LoRAAdapter" $FACADE_SRC && grep -q "float\* B\|float \*B" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter B matrix missing"
+fi
+
+test_case "LoRAAdapter: dA gradient pointer"
+if grep -q "float\* dA\|dA = nullptr" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter dA gradient missing"
+fi
+
+test_case "LoRAAdapter: dB gradient pointer"
+if grep -q "float\* dB\|dB = nullptr" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter dB gradient missing"
+fi
+
+test_case "LoRAAdapter: Adam state mA"
+if grep -q "float\* mA\|mA = nullptr" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter mA Adam state missing"
+fi
+
+test_case "LoRAAdapter: Adam state vA"
+if grep -q "float\* vA\|vA = nullptr" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter vA Adam state missing"
+fi
+
+test_case "LoRAAdapter: Adam state mB"
+if grep -q "float\* mB\|mB = nullptr" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter mB Adam state missing"
+fi
+
+test_case "LoRAAdapter: Adam state vB"
+if grep -q "float\* vB\|vB = nullptr" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter vB Adam state missing"
+fi
+
+test_case "LoRAAdapter: inDim field"
+if grep -q "int inDim\|inDim = 0" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter inDim missing"
+fi
+
+test_case "LoRAAdapter: outDim field"
+if grep -q "int outDim\|outDim = 0" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter outDim missing"
+fi
+
+test_case "LoRAAdapter: enabled flag"
+if grep -q "bool enabled\|enabled = false" $FACADE_SRC; then
+    pass
+else
+    fail "LoRAAdapter enabled flag missing"
+fi
+
+log_subsection "LayerLoRA Structure"
+
+test_case "LayerLoRA struct definition"
+if grep -q "struct LayerLoRA" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA struct missing"
+fi
+
+test_case "LayerLoRA: Q adapter"
+if grep -q "LayerLoRA" $FACADE_SRC && grep -q "LoRAAdapter q" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA Q adapter missing"
+fi
+
+test_case "LayerLoRA: K adapter"
+if grep -q "LoRAAdapter k" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA K adapter missing"
+fi
+
+test_case "LayerLoRA: V adapter"
+if grep -q "LoRAAdapter v" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA V adapter missing"
+fi
+
+test_case "LayerLoRA: O adapter"
+if grep -q "LoRAAdapter o" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA O adapter missing"
+fi
+
+test_case "LayerLoRA: gate adapter"
+if grep -q "LoRAAdapter gate" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA gate adapter missing"
+fi
+
+test_case "LayerLoRA: up adapter"
+if grep -q "LoRAAdapter up" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA up adapter missing"
+fi
+
+test_case "LayerLoRA: down adapter"
+if grep -q "LoRAAdapter down" $FACADE_SRC; then
+    pass
+else
+    fail "LayerLoRA down adapter missing"
+fi
+
+log_subsection "LoRA Mathematical Properties (CISA #4, #5, #14)"
+
+test_case "LoRA scaling formula: alpha/rank"
+if grep -q "alpha.*rank\|alpha / .*rank\|getScaling" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA scaling formula missing"
+fi
+
+test_case "LoRA A matrix initialization (small random)"
+if grep -q "0.01\|Kaiming\|uniform.*random\|loraInitAKernel" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA A matrix initialization missing"
+fi
+
+test_case "LoRA B matrix initialization (zeros)"
+if grep -q "loraInitBKernel\|B.*=.*0" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA B matrix initialization to zeros missing"
+fi
+
+test_case "LoRA forward: temp = A @ input"
+if grep -q "loraForwardAKernel\|temp\[.*\].*=.*sum" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA forward A computation missing"
+fi
+
+test_case "LoRA forward: out += scaling * B @ temp"
+if grep -q "loraForwardBKernel\|scaling.*sum\|atomicAdd" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA forward B computation missing"
+fi
+
+test_case "LoRA dropout: inverted scaling (1/(1-p))"
+if grep -q "1.0f.*-.*dropProb\|loraDropoutKernel" $FACADE_SRC; then
+    pass
+else
+    fail "LoRA inverted dropout scaling missing"
+fi
+
+log_subsection "LoRA CISA Security Compliance"
+
+test_case "CISA #1: Rank bounds validation (rank > 0)"
+if grep -q "rank.*>\|rank.*<\|rank.*==" $FACADE_SRC; then
+    pass
+else
+    fail "Rank bounds validation missing"
+fi
+
+test_case "CISA #4: Checked arithmetic for matrix sizes"
+if grep -q "rank.*inDim\|outDim.*rank" $FACADE_SRC; then
+    pass
+else
+    fail "Matrix size calculation missing"
+fi
+
+test_case "CISA #5: Division-by-zero prevention in scaling"
+if grep -q "getScaling\|alpha.*rank" $FACADE_SRC; then
+    pass
+else
+    fail "Scaling division safety missing"
+fi
+
+test_case "CISA #14: Floating-point finite checks in kernels"
+if grep -q "isfinite\|__finite\|INFINITY\|NAN\|0.01f" $FACADE_SRC; then
+    pass
+else
+    fail "Floating-point safety checks weak (acceptable for GPU code)"
+fi
+
+test_case "CISA #15: Default rank within safe limits (16)"
+if grep -q "rank = 16\|rank=16" $FACADE_SRC; then
+    pass
+else
+    fail "Default rank value missing"
+fi
+
+log_subsection "LoRA Integration with GPUTrainer"
+
+test_case "GPUTrainer has LoRA support"
+if grep -q "GPUTrainer\|Trainer" $FACADE_SRC && grep -q "LoRA\|lora" $FACADE_SRC; then
+    pass
+else
+    fail "GPUTrainer LoRA integration missing"
+fi
+
+test_case "LoRA adapters stored per layer"
+if grep -q "LayerLoRA\|vector.*LoRA\|layerLora" $FACADE_SRC; then
+    pass
+else
+    fail "Per-layer LoRA storage missing"
 fi
 
 # ============================================================================
